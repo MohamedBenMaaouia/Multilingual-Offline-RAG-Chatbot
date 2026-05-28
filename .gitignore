@@ -1,0 +1,52 @@
+# Local secrets / env (keep only the example template)
+.env
+.env.*
+!.env.example
+
+# Data (raw corpus and persisted vector store are not versioned)
+data/raw/*
+!data/raw/.gitkeep
+data/chroma/*
+!data/chroma/.gitkeep
+
+# Eval run artifacts
+eval/results/*
+!eval/results/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build artifacts
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Internal docs — not published to the public repo (kept locally)
+ARCHITECTURE.md
+TUNING.md
+DEMO.md
+
+# Claude Code working files (internal project context, references private domain)
+.claude/
+
+# Windows / OneDrive cruft
+desktop.ini
+Thumbs.db
+*.tmp
+~$*

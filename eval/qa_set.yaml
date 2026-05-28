@@ -1,0 +1,146 @@
+- id: q001
+  question: "What does diagnostic code P0420 mean?"
+  expected_answer_contains: ["catalyst", "efficiency", "bank 1"]
+  expected_sources: ["obd_codes.csv"]
+  language: en
+  category: diagnostic_code
+
+- id: q002
+  question: "What is the cause of P0506?"
+  expected_answer_contains: ["P0506", "idle control", "lower than expected"]
+  expected_sources: ["obd_codes.csv"]
+  language: en
+  category: diagnostic_code
+
+- id: q003
+  question: "P0171"
+  expected_answer_contains: ["P0171", "system too lean", "bank 1"]
+  expected_sources: ["obd_codes.csv"]
+  language: en
+  category: diagnostic_code
+
+- id: q004
+  question: "What does the diagnostic code P0455 indicate?"
+  expected_answer_contains: ["P0455", "evaporative", "leak", "large"]
+  expected_sources: ["obd_codes.csv"]
+  language: en
+  category: diagnostic_code
+
+- id: q005
+  question: "P0455"
+  expected_answer_contains: ["P0455", "evaporative", "leak"]
+  expected_sources: ["obd_codes.csv"]
+  language: en
+  category: diagnostic_code
+
+- id: q006
+  question: "À quelle fréquence dois-je changer l'huile moteur ?"
+  expected_answer_contains: ["8 000 km", "5 000 mi", "six mois"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-French.pdf"]
+  language: fr
+  category: maintenance_schedule
+
+- id: q007
+  question: "How often should the engine air filter be replaced on the F-150?"
+  expected_answer_contains: ["air filter", "scheduled maintenance", "intervals"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-English.pdf"]
+  language: en
+  category: maintenance_schedule
+
+- id: q008
+  question: "How much oil should I use after an oil change on the F-150?"
+  expected_answer_contains: ["oil", "between", "maximum", "minimum"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-English.pdf"]
+  language: en
+  category: maintenance_schedule
+
+- id: q009
+  question: "Quand dois-je faire la rotation des pneus de mon F-150 ?"
+  expected_answer_contains: ["permutation", "pneus", "intervalle"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-French.pdf"]
+  language: fr
+  category: maintenance_schedule
+
+- id: q010
+  question: "When does the F-150 tell me to change the engine oil?"
+  expected_answer_contains: ["oil change message", "Intelligent Oil-Life Monitor", "information display"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-English.pdf"]
+  language: en
+  category: maintenance_schedule
+
+- id: q011
+  question: "What does the Service Engine Soon light mean on my F-150?"
+  expected_answer_contains: ["Service Engine Soon", "On Board Diagnostics", "emissions"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-English.pdf"]
+  language: en
+  category: symptoms
+
+- id: q012
+  question: "What should I do if my F-150 won't start after a few tries?"
+  expected_answer_contains: ["three attempts", "brake pedal", "accelerator"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-English.pdf"]
+  language: en
+  category: symptoms
+
+- id: q013
+  question: "Que signifie le témoin de la batterie qui s'allume sur le tableau de bord ?"
+  expected_answer_contains: ["batterie", "charge", "système"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-French.pdf"]
+  language: fr
+  category: symptoms
+
+- id: q014
+  question: "Why does my tire pressure light come on when it's cold outside?"
+  expected_answer_contains: ["tire pressure", "temperature", "decrease", "psi"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-English.pdf"]
+  language: en
+  category: symptoms
+
+- id: q015
+  question: "Quels sont les signes qu'un pneu est sous-gonflé ?"
+  expected_answer_contains: ["sous-gonflé", "pression", "chaud"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-French.pdf"]
+  language: fr
+  category: symptoms
+
+- id: q016
+  question: "How do I check the engine oil level on my F-150?"
+  expected_answer_contains: ["parking brake", "dipstick", "lint-free cloth"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-English.pdf"]
+  language: en
+  category: procedure
+
+- id: q017
+  question: "How do I jump-start my F-150 with another vehicle?"
+  expected_answer_contains: ["positive", "negative", "booster", "terminal"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-English.pdf"]
+  language: en
+  category: procedure
+
+- id: q018
+  question: "Comment démarrer mon F-150 à l'aide d'une autre batterie ?"
+  expected_answer_contains: ["positif", "négatif", "batterie d'appoint"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-French.pdf"]
+  language: fr
+  category: procedure
+
+- id: q019
+  question: "Comment vérifier le niveau de liquide de refroidissement ?"
+  expected_answer_contains: ["liquide de refroidissement", "bouchon", "prédilué"]
+  expected_sources: ["manuals/2017-F-150-Owners-Manual-French.pdf"]
+  language: fr
+  category: procedure
+
+- id: q020
+  question: "What is the meaning of OBD code P0301?"
+  expected_answer_contains: ["cylinder 1", "misfire", "detected"]
+  expected_sources: ["obd_codes.csv"]
+  language: en
+  category: diagnostic_code
+
+- id: q021
+  question: "What is the timing belt replacement interval on a 2018 Honda Civic?"
+  expected_answer_contains: ["don't have enough information"]
+  expected_sources: []
+  language: en
+  category: refusal
