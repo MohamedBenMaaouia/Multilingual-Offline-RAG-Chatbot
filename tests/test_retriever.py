@@ -143,6 +143,7 @@ def test_dense_alone_misses_exact_code(tmp_qdrant, monkeypatch, similar_code_row
     """
     monkeypatch.setattr(settings, "retrieval_mode", "dense")
     monkeypatch.setattr(settings, "search_type", "similarity")
+    monkeypatch.setattr(settings, "reranker_enabled", False)
     add_chunks(similar_code_rows)
     assert "P0451" not in _codes(get_retriever().invoke("What does P0451 mean?"))
 
@@ -155,6 +156,7 @@ def test_hybrid_brings_exact_code_to_the_top(tmp_qdrant, monkeypatch, similar_co
     single best chunk is the cross-encoder reranker's job.
     """
     monkeypatch.setattr(settings, "retrieval_mode", "hybrid")
+    monkeypatch.setattr(settings, "reranker_enabled", False)
     add_chunks(similar_code_rows)
     for code in ("P0455", "P0442", "P0451"):
         top = _codes(get_retriever().invoke(f"What does {code} mean?"))[:2]

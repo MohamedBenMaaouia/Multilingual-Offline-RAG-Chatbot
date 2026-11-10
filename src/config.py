@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     mmr_lambda: float = 0.5
     search_type: Literal["mmr", "similarity"] = "mmr"
 
+    # Cross-encoder reranking of the fetch_k candidates down to top_k.
+    # On since Nov 2026: passage MRR 0.55 -> 0.60, every code question ranks
+    # its row first; costs ~2 s per question on CPU.
+    reranker_enabled: bool = True
+    reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+
     # Share of top_k reserved for chunks matching the request language.
     # The remaining slots stay language-agnostic so cross-language content
     # (e.g. an English-only code table) is still reachable from a French

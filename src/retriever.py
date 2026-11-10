@@ -88,6 +88,13 @@ class RagRetriever(BaseRetriever):
     fetch_k: int
     mmr_lambda: float
     language_pref_ratio: float
+    rerank: bool = False
+
+    def _n_preferred(self) -> int:
+        """Slots of top_k reserved for the request language (0 = no preference)."""
+        if not self.language or self.language_pref_ratio <= 0:
+            return 0
+        return max(1, min(self.top_k, round(self.top_k * self.language_pref_ratio)))
 
     def _search(self, query: str, k: int, language: str | None = None) -> list[Document]:
         """One search honoring the configured strategy, optionally language-filtered."""
@@ -108,15 +115,36 @@ class RagRetriever(BaseRetriever):
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
     ) -> list[Document]:
-        if not self.language or self.language_pref_ratio <= 0:
+        if self.rerank:
+            return self._reranked(query)
+        n_pref = self._n_preferred()
+        if not n_pref:
             return self._search(query, self.top_k)
         # Two searches, merged preferring the language-matched list. The
         # unfiltered pass keeps cross-language content (English-only code
         # rows, for example) reachable from a non-English question.
-        n_pref = max(1, min(self.top_k, round(self.top_k * self.language_pref_ratio)))
         preferred = self._search(query, n_pref, language=self.language)
         general = self._search(query, self.top_k)
         return _merge_unique(preferred, general, limit=self.top_k)
+
+    def _reranked(self, query: str) -> list[Document]:
+        """Wide candidate pool -> cross-encoder order -> language quota -> top_k."""
+        from src.reranker import rerank
+
+        candidates = self._search(query, self.fetch_k)
+        n_pref = self._n_preferred()
+        if n_pref:
+            # Same-language candidates searched separately so they are in the
+            # pool even when the other language dominates the open search.
+            same_lang = self._search(query, self.fetch_k, language=self.language)
+            candidates = _merge_unique(same_lang, candidates, limit=2 * self.fetch_k)
+        ranked = rerank(query, candidates)
+        if not n_pref:
+            return ranked[: self.top_k]
+        # Same quota semantics as the unreranked path: the best n_pref chunks
+        # in the request language first, then the best of the rest.
+        preferred = [d for d in ranked if (d.metadata or {}).get("language") == self.language]
+        return _merge_unique(preferred[:n_pref], ranked, limit=self.top_k)
 
 
 def get_retriever(language: str | None = None) -> RagRetriever:
@@ -137,5 +165,6 @@ def get_retriever(language: str | None = None) -> RagRetriever:
             fetch_k=settings.fetch_k,
             mmr_lambda=settings.mmr_lambda,
             language_pref_ratio=settings.language_pref_ratio,
+            rerank=settings.reranker_enabled,
         )
     return _retrievers[key]
