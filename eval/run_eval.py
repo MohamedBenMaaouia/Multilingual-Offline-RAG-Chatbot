@@ -1,23 +1,38 @@
-"""Day 5 baseline eval harness.
+"""Evaluation harness: retrieval, answer and (optionally) RAGAS generation metrics.
 
 Architectural choice: call the chain directly (via src.chain.get_chain()),
 NOT the /chat HTTP endpoint. Justification:
 - No HTTP overhead, no uvicorn process management in CI/eval contexts.
-- Direct access to result["context"] Documents needed for hit@k and MRR
-  (which require metadata, not just the API's SourceRef projection).
-- RAGAS integration needs the same chain object; HTTP would add a JSON
-  deserialization round-trip for no gain.
+- Direct access to result["context"] Documents needed for the retrieval
+  metrics (which require metadata and chunk text, not the API's SourceRef
+  projection).
 - Easier to reproduce — one Python script, no external service to start/stop.
 
-Per ARCHITECTURE.md §6:
-- Deterministic metrics (hit@k, MRR, keyword recall) are the primary signal.
-- RAGAS faithfulness + answer_relevance are on-demand via --ragas because
-  they cost LLM calls and are non-deterministic (LLM-as-judge).
+Metrics
+-------
+Deterministic (primary signal, every run):
+- file hit@k / file MRR — did a chunk from an ``expected_sources`` file come
+  back, and how high. File-granular: any row of obd_codes.csv counts.
+- passage hit@k / passage MRR — did a chunk containing one of the
+  ``expected_chunk_contains`` anchors come back, and how high. This is the
+  honest retrieval metric: it fails when the P0420 question retrieves six
+  OBD rows that are not P0420.
+- keyword recall — share of ``expected_answer_contains`` in the answer.
+- refusal correctness — the out-of-corpus question gets the canned line.
+
+LLM-as-judge (on demand, ``--ragas``):
+- faithfulness — share of the answer's claims supported by the retrieved
+  chunks (the hallucination check).
+- answer relevance — does the answer address the question.
+Judged by ``settings.ragas_judge_model`` (a different, larger model than the
+one under test) against the exact chunks the answer was generated from.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
 import sys
 import time
 import traceback
@@ -37,6 +52,7 @@ except Exception:
 from src.chain import get_chain
 from src.config import settings
 from src.language import language_name, resolve_language
+from src.retriever import get_retriever
 from src.vectorstore import get_collection
 
 
@@ -85,6 +101,21 @@ def _mrr(retrieved_sources: list[str], expected_sources: list[str]) -> float:
     return 0.0
 
 
+def _normalize(text: str) -> str:
+    """Lowercase and collapse whitespace — PDF text breaks lines mid-phrase."""
+    return re.sub(r"\s+", " ", text or "").strip().lower()
+
+
+def _passage_rank(contexts: list[str], anchors: list[str]) -> int | None:
+    """1-based rank of the first chunk containing any anchor; None if none does."""
+    needles = [_normalize(a) for a in anchors if a]
+    for i, chunk in enumerate(contexts, start=1):
+        text = _normalize(chunk)
+        if any(n in text for n in needles):
+            return i
+    return None
+
+
 def _keyword_recall(
     answer: str, expected_substrings: list[str]
 ) -> tuple[float, list[str], list[str]]:
@@ -102,11 +133,20 @@ def _keyword_recall(
     return len(hits) / len(expected_substrings), hits, misses
 
 
-def _safe_mean(values: list[float]) -> float | None:
+def _safe_mean(values: list[float | None]) -> float | None:
     vals = [v for v in values if v is not None]
     if not vals:
         return None
     return sum(vals) / len(vals)
+
+
+def _score_or_none(value: Any) -> float | None:
+    """RAGAS reports failed judgements as NaN; store them as None."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(f) else f
 
 
 # ---------------------------------------------------------------------------
@@ -114,29 +154,37 @@ def _safe_mean(values: list[float]) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def evaluate_question(q: dict[str, Any]) -> dict[str, Any]:
+def evaluate_question(q: dict[str, Any], retrieval_only: bool = False) -> dict[str, Any]:
     """Run one question through the chain and compute deterministic metrics.
 
     Mirrors the production ``/chat`` path exactly: language is resolved from
     the question text the way ``language="auto"`` (the schema default) does,
     then drives both the retrieval bias and the answer-language directive.
     Evaluating an unbiased chain would measure a code path no client uses.
+
+    ``retrieval_only`` runs the same retriever the chain uses but skips the
+    LLM: seconds instead of minutes, no Ollama needed. Answer metrics
+    (keyword recall, refusal) are then None.
     """
     qid = q["id"]
     question = q["question"]
     expected_sources = q.get("expected_sources") or []
     expected_kw = q.get("expected_answer_contains") or []
+    anchors = q.get("expected_chunk_contains") or []
     category = q["category"]
     language = q["language"]
+    is_refusal = category == "refusal"
 
     resolved_lang = resolve_language(question)
-    chain = get_chain(resolved_lang)
 
     t0 = time.perf_counter()
     try:
-        result = chain.invoke(
-            {"input": question, "answer_language": language_name(resolved_lang)}
-        )
+        if retrieval_only:
+            result = {"answer": None, "context": get_retriever(resolved_lang).invoke(question)}
+        else:
+            result = get_chain(resolved_lang).invoke(
+                {"input": question, "answer_language": language_name(resolved_lang)}
+            )
     except Exception as e:  # pragma: no cover - operational
         print(f"[{qid}] chain.invoke FAILED: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
@@ -147,13 +195,17 @@ def evaluate_question(q: dict[str, Any]) -> dict[str, Any]:
             "language": language,
             "answer": f"<error: {e}>",
             "retrieved_sources": [],
+            "retrieved_contexts": [],
             "expected_sources": expected_sources,
-            "hit_at_k": None if category == "refusal" else False,
-            "mrr": None if category == "refusal" else 0.0,
+            "hit_at_k": None if is_refusal else False,
+            "mrr": None if is_refusal else 0.0,
+            "passage_rank": None,
+            "passage_hit_at_k": None if is_refusal or not anchors else False,
+            "passage_mrr": None if is_refusal or not anchors else 0.0,
             "keyword_recall": 0.0,
             "keyword_matches": [],
             "keyword_misses": list(expected_kw),
-            "refusal_correct": False if category == "refusal" else None,
+            "refusal_correct": False if is_refusal else None,
             "faithfulness": None,
             "answer_relevance": None,
             "latency_ms": int((time.perf_counter() - t0) * 1000),
@@ -161,24 +213,31 @@ def evaluate_question(q: dict[str, Any]) -> dict[str, Any]:
         }
     latency_ms = int((time.perf_counter() - t0) * 1000)
 
-    answer = result.get("answer", "") or ""
+    answer = result.get("answer")
     docs = result.get("context", []) or []
-    retrieved_sources = [
-        (d.metadata.get("source") if hasattr(d, "metadata") else "") or ""
-        for d in docs
-    ]
+    retrieved_sources = [(d.metadata or {}).get("source", "") or "" for d in docs]
+    retrieved_contexts = [d.page_content or "" for d in docs]
 
-    kw_recall, kw_hits, kw_misses = _keyword_recall(answer, expected_kw)
+    if retrieval_only:
+        kw_recall, kw_hits, kw_misses = None, [], []
+    else:
+        answer = answer or ""
+        kw_recall, kw_hits, kw_misses = _keyword_recall(answer, expected_kw)
 
-    is_refusal = category == "refusal"
     if is_refusal:
-        hit = None
-        mrr = None
-        refusal_correct = kw_recall >= 1.0
+        hit = mrr = None
+        p_rank = p_hit = p_mrr = None
+        refusal_correct = None if retrieval_only else kw_recall >= 1.0
     else:
         hit = _hit_at_k(retrieved_sources, expected_sources)
         mrr = _mrr(retrieved_sources, expected_sources)
         refusal_correct = None
+        if anchors:
+            p_rank = _passage_rank(retrieved_contexts, anchors)
+            p_hit = p_rank is not None
+            p_mrr = 1.0 / p_rank if p_rank else 0.0
+        else:
+            p_rank = p_hit = p_mrr = None
 
     return {
         "id": qid,
@@ -188,9 +247,14 @@ def evaluate_question(q: dict[str, Any]) -> dict[str, Any]:
         "resolved_language": resolved_lang,
         "answer": answer,
         "retrieved_sources": retrieved_sources,
+        "retrieved_contexts": retrieved_contexts,
         "expected_sources": expected_sources,
+        "expected_chunk_contains": anchors,
         "hit_at_k": hit,
         "mrr": mrr,
+        "passage_rank": p_rank,
+        "passage_hit_at_k": p_hit,
+        "passage_mrr": p_mrr,
         "keyword_recall": kw_recall,
         "keyword_matches": kw_hits,
         "keyword_misses": kw_misses,
@@ -206,107 +270,101 @@ def evaluate_question(q: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def run_ragas(rows: list[dict[str, Any]]) -> None:
-    """Mutate rows in place: fill faithfulness + answer_relevance per question.
+def _judge_available() -> bool:
+    """True if the judge model is pulled in the local Ollama instance."""
+    import httpx
 
-    Wrapped in try/except — RAGAS' API churns. On any failure, leave the field
-    as None and log to stderr. NEVER abort the eval run on RAGAS errors.
+    try:
+        r = httpx.get(settings.ollama_url.rstrip("/") + "/api/tags", timeout=5.0)
+        names = {m.get("name", "") for m in r.json().get("models", [])}
+    except Exception as e:
+        print(f"[ragas] cannot reach Ollama at {settings.ollama_url}: {e}", file=sys.stderr)
+        return False
+    wanted = settings.ragas_judge_model
+    if wanted in names or f"{wanted}:latest" in names:
+        return True
+    print(
+        f"[ragas] judge model '{wanted}' is not pulled. Run: ollama pull {wanted}",
+        file=sys.stderr,
+    )
+    return False
+
+
+def run_ragas(rows: list[dict[str, Any]]) -> None:
+    """Fill ``faithfulness`` and ``answer_relevance`` on each scorable row, in place.
+
+    Scores the exact chunks each answer was generated from (captured in
+    ``retrieved_contexts``), never a fresh retrieval. Refusal rows and rows
+    that errored are skipped. Any RAGAS failure leaves the fields as None and
+    never aborts the run — the deterministic results are already on disk.
     """
     try:
+        from langchain_ollama import ChatOllama
+        from ragas import EvaluationDataset
         from ragas import evaluate as ragas_evaluate
-        from ragas.metrics import Faithfulness, AnswerRelevancy
-        from ragas.llms import LangchainLLMWrapper
         from ragas.embeddings import LangchainEmbeddingsWrapper
-        from datasets import Dataset
+        from ragas.llms import LangchainLLMWrapper
+        from ragas.metrics import Faithfulness, ResponseRelevancy
+        from ragas.run_config import RunConfig
 
-        from src.llm import get_llm
         from src.embeddings import get_embeddings
     except Exception as e:
         print(f"[ragas] import failed, skipping: {e}", file=sys.stderr)
         return
 
-    # Build the dataset RAGAS expects.
-    try:
-        records = []
-        for r in rows:
-            if r["category"] == "refusal":
-                # Refusal questions are not meaningfully scorable by RAGAS
-                # (the model is supposed to refuse — faithfulness is moot).
-                continue
-            # We don't have a separate "reference" answer; RAGAS faithfulness
-            # only needs (question, answer, contexts). answer_relevance only
-            # needs (question, answer). We supply both.
-            records.append(
-                {
-                    "question": r["question"],
-                    "answer": r["answer"],
-                    "contexts": [],  # filled below
-                    "id": r["id"],
-                }
-            )
-    except Exception as e:
-        print(f"[ragas] dataset build failed: {e}", file=sys.stderr)
+    if not _judge_available():
         return
 
-    # We need the original retrieved Documents' text for contexts, which we
-    # didn't capture in the row (only the source names). Re-running the chain
-    # would double the runtime. Instead, fetch contexts opportunistically by
-    # storing them when we run RAGAS — but we lost them after evaluate_question.
-    # Compromise: do per-row RAGAS calls so we can use the chain we already have.
+    scored = [
+        r for r in rows
+        if r["category"] != "refusal" and not r.get("error") and r.get("retrieved_contexts")
+    ]
+    if not scored:
+        print("[ragas] nothing to score", file=sys.stderr)
+        return
+
+    judge = ChatOllama(
+        model=settings.ragas_judge_model,
+        base_url=settings.ollama_url,
+        temperature=0.0,
+        num_ctx=settings.ragas_judge_num_ctx,
+        timeout=settings.ragas_judge_timeout_s,
+    )
+    dataset = EvaluationDataset.from_list(
+        [
+            {
+                "user_input": r["question"],
+                "response": r["answer"],
+                "retrieved_contexts": r["retrieved_contexts"],
+            }
+            for r in scored
+        ]
+    )
+    # strictness=1: one generated question per answer instead of three —
+    # a third of the judge calls, which matters with a 14B model on CPU.
+    # max_workers=1: a local Ollama serves one request at a time; parallel
+    # calls only queue up and hit the timeout.
     try:
-        llm_wrapper = LangchainLLMWrapper(__import__("src.llm", fromlist=["get_llm"]).get_llm())
-        emb_wrapper = LangchainEmbeddingsWrapper(
-            __import__("src.embeddings", fromlist=["get_embeddings"]).get_embeddings()
+        result = ragas_evaluate(
+            dataset=dataset,
+            metrics=[Faithfulness(), ResponseRelevancy(strictness=1)],
+            llm=LangchainLLMWrapper(judge),
+            embeddings=LangchainEmbeddingsWrapper(get_embeddings()),
+            run_config=RunConfig(
+                timeout=settings.ragas_judge_timeout_s, max_workers=1, max_retries=2
+            ),
+            raise_exceptions=False,
+            show_progress=True,
         )
+        df = result.to_pandas()
     except Exception as e:
-        print(f"[ragas] wrapper init failed: {e}", file=sys.stderr)
+        print(f"[ragas] evaluation failed: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return
 
-    # Per-row scoring. We re-invoke the chain (cost: doubles total LLM calls
-    # for refusal+non-refusal). This is the trade-off for keeping the main
-    # loop simple and avoiding context capture refactoring.
-    try:
-        chain = get_chain()
-    except Exception as e:
-        print(f"[ragas] chain init failed: {e}", file=sys.stderr)
-        return
-
-    for r in rows:
-        if r["category"] == "refusal":
-            continue
-        try:
-            # Re-fetch contexts by invoking the retriever portion only.
-            # We reuse the cached singletons so this is just MMR retrieval.
-            from src.retriever import get_retriever
-
-            docs = get_retriever().invoke(r["question"])
-            contexts = [d.page_content for d in docs]
-
-            ds = Dataset.from_list(
-                [
-                    {
-                        "question": r["question"],
-                        "answer": r["answer"],
-                        "contexts": contexts,
-                    }
-                ]
-            )
-            scores = ragas_evaluate(
-                dataset=ds,
-                metrics=[Faithfulness(), AnswerRelevancy()],
-                llm=llm_wrapper,
-                embeddings=emb_wrapper,
-                raise_exceptions=False,
-            )
-            df = scores.to_pandas()
-            r["faithfulness"] = float(df["faithfulness"].iloc[0]) if "faithfulness" in df.columns else None
-            r["answer_relevance"] = (
-                float(df["answer_relevancy"].iloc[0]) if "answer_relevancy" in df.columns else None
-            )
-        except Exception as e:
-            print(f"[ragas] {r['id']} failed: {e}", file=sys.stderr)
-            r["faithfulness"] = None
-            r["answer_relevance"] = None
+    for r, (_, rec) in zip(scored, df.iterrows()):
+        r["faithfulness"] = _score_or_none(rec.get("faithfulness"))
+        r["answer_relevance"] = _score_or_none(rec.get("answer_relevancy"))
 
 
 # ---------------------------------------------------------------------------
@@ -314,48 +372,62 @@ def run_ragas(rows: list[dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _new_bucket() -> dict[str, Any]:
+    return {"hits": [], "mrrs": [], "p_hits": [], "p_mrrs": [], "kws": [], "n": 0}
+
+
+def _add_to_bucket(bucket: dict[str, Any], r: dict[str, Any]) -> None:
+    bucket["n"] += 1
+    if r["category"] == "refusal":
+        return
+    bucket["kws"].append(r["keyword_recall"])
+    bucket["hits"].append(1.0 if r["hit_at_k"] else 0.0)
+    bucket["mrrs"].append(r["mrr"])
+    if r.get("passage_hit_at_k") is not None:
+        bucket["p_hits"].append(1.0 if r["passage_hit_at_k"] else 0.0)
+        bucket["p_mrrs"].append(r["passage_mrr"])
+
+
+def _bucket_summary(b: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "n": b["n"],
+        "hit_at_k": _safe_mean(b["hits"]),
+        "mrr": _safe_mean(b["mrrs"]),
+        "passage_hit_at_k": _safe_mean(b["p_hits"]),
+        "passage_mrr": _safe_mean(b["p_mrrs"]),
+        "keyword_recall": _safe_mean(b["kws"]),
+    }
+
+
 def aggregate(rows: list[dict[str, Any]], ragas_enabled: bool) -> dict[str, Any]:
     non_refusal = [r for r in rows if r["category"] != "refusal"]
     refusal = [r for r in rows if r["category"] == "refusal"]
+    passage_scored = [r for r in non_refusal if r.get("passage_hit_at_k") is not None]
 
-    hit_vals = [1.0 if r["hit_at_k"] else 0.0 for r in non_refusal]
-    mrr_vals = [r["mrr"] for r in non_refusal]
-    kw_all = [r["keyword_recall"] for r in rows]  # includes refusal
-    refusal_vals = [1.0 if r["refusal_correct"] else 0.0 for r in refusal]
-
-    by_category: dict[str, dict[str, Any]] = defaultdict(lambda: {"hits": [], "mrrs": [], "kws": [], "n": 0})
+    by_category: dict[str, dict[str, Any]] = defaultdict(_new_bucket)
+    by_lang: dict[str, dict[str, Any]] = defaultdict(_new_bucket)
     for r in rows:
-        bucket = by_category[r["category"]]
-        bucket["n"] += 1
-        bucket["kws"].append(r["keyword_recall"])
-        if r["category"] != "refusal":
-            bucket["hits"].append(1.0 if r["hit_at_k"] else 0.0)
-            bucket["mrrs"].append(r["mrr"])
-
-    by_lang: dict[str, dict[str, Any]] = defaultdict(lambda: {"hits": [], "mrrs": [], "kws": [], "n": 0})
-    for r in rows:
-        bucket = by_lang[r["language"]]
-        bucket["n"] += 1
-        bucket["kws"].append(r["keyword_recall"])
-        if r["category"] != "refusal":
-            bucket["hits"].append(1.0 if r["hit_at_k"] else 0.0)
-            bucket["mrrs"].append(r["mrr"])
-
-    def _bucket_summary(b: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "n": b["n"],
-            "hit_at_k": _safe_mean(b["hits"]) if b["hits"] else None,
-            "mrr": _safe_mean(b["mrrs"]) if b["mrrs"] else None,
-            "keyword_recall": _safe_mean(b["kws"]),
-        }
+        _add_to_bucket(by_category[r["category"]], r)
+        _add_to_bucket(by_lang[r["language"]], r)
 
     agg: dict[str, Any] = {
         "n_questions": len(rows),
         "n_scored_hit_mrr": len(non_refusal),
-        "hit_at_k_mean": _safe_mean(hit_vals),
-        "mrr_mean": _safe_mean(mrr_vals),
-        "keyword_recall_mean": _safe_mean(kw_all),
-        "refusal_correct_rate": _safe_mean(refusal_vals),
+        "n_scored_passage": len(passage_scored),
+        "hit_at_k_mean": _safe_mean([1.0 if r["hit_at_k"] else 0.0 for r in non_refusal]),
+        "mrr_mean": _safe_mean([r["mrr"] for r in non_refusal]),
+        "passage_hit_at_k_mean": _safe_mean(
+            [1.0 if r["passage_hit_at_k"] else 0.0 for r in passage_scored]
+        ),
+        "passage_mrr_mean": _safe_mean([r["passage_mrr"] for r in passage_scored]),
+        # Non-refusal only: the refusal question scores 1.0 whenever the model
+        # refuses, which inflated the old all-rows mean by ~2 points.
+        "keyword_recall_mean": _safe_mean([r["keyword_recall"] for r in non_refusal]),
+        # All 21 rows, kept so runs stay comparable with pre-Nov-2026 results.
+        "keyword_recall_mean_all_rows": _safe_mean([r["keyword_recall"] for r in rows]),
+        "refusal_correct_rate": _safe_mean(
+            [None if r["refusal_correct"] is None else float(r["refusal_correct"]) for r in refusal]
+        ),
         "n_refusal": len(refusal),
         "by_category": {k: _bucket_summary(v) for k, v in by_category.items()},
         "by_language": {k: _bucket_summary(v) for k, v in by_lang.items()},
@@ -363,8 +435,11 @@ def aggregate(rows: list[dict[str, Any]], ragas_enabled: bool) -> dict[str, Any]
     }
 
     if ragas_enabled:
-        agg["faithfulness_mean"] = _safe_mean([r.get("faithfulness") for r in rows])
-        agg["answer_relevance_mean"] = _safe_mean([r.get("answer_relevance") for r in rows])
+        faith = [r.get("faithfulness") for r in non_refusal]
+        relev = [r.get("answer_relevance") for r in non_refusal]
+        agg["faithfulness_mean"] = _safe_mean(faith)
+        agg["answer_relevance_mean"] = _safe_mean(relev)
+        agg["n_ragas_scored"] = sum(1 for f in faith if f is not None)
 
     return agg
 
@@ -374,66 +449,68 @@ def aggregate(rows: list[dict[str, Any]], ragas_enabled: bool) -> dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
+def _pct(x: float | None) -> str:
+    return "n/a" if x is None else f"{x * 100:.1f}%"
+
+
+def _num(x: float | None) -> str:
+    return "n/a" if x is None else f"{x:.2f}"
+
+
 def print_summary(rows: list[dict[str, Any]], agg: dict[str, Any], out_path: Path, collection_count: int) -> None:
     ts_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    ragas_on = "on" if agg.get("faithfulness_mean") is not None or agg.get("answer_relevance_mean") is not None else "off"
-
-    n_nr = agg["n_scored_hit_mrr"]
-    n_ref = agg["n_refusal"]
-    hit_pct = (agg["hit_at_k_mean"] or 0.0) * 100
-    hit_count = sum(1 for r in rows if r["category"] != "refusal" and r["hit_at_k"])
-    kw_pct = (agg["keyword_recall_mean"] or 0.0) * 100
-    refusal_pct = (agg["refusal_correct_rate"] or 0.0) * 100
-    refusal_hits = sum(1 for r in rows if r["category"] == "refusal" and r["refusal_correct"])
+    k = settings.top_k
+    ragas_on = "faithfulness_mean" in agg
 
     print()
-    print(f"=== Day 5 Baseline Eval — {ts_utc} ===")
-    print(f"Corpus: {collection_count} chunks  |  Model: {settings.llm_model}  |  RAGAS: {ragas_on}")
+    print(f"=== RAG eval — {ts_utc} ===")
+    print(
+        f"Corpus: {collection_count} chunks  |  Model: {settings.llm_model}  |  "
+        f"search: {settings.search_type}, k={k}  |  RAGAS: {'on' if ragas_on else 'off'}"
+    )
     print()
-    print("Overall (excluding refusal):")
-    print(f"  hit@{settings.top_k}         : {hit_count}/{n_nr} = {hit_pct:.1f}%")
-    print(f"  MRR           : {(agg['mrr_mean'] or 0.0):.2f}")
-    print(f"  keyword recall: {kw_pct:.1f}%")
-    if n_ref:
-        print(f"  refusal correct: {refusal_hits}/{n_ref} = {refusal_pct:.0f}%")
-    if ragas_on == "on":
-        if agg.get("faithfulness_mean") is not None:
-            print(f"  faithfulness  : {agg['faithfulness_mean']:.2f}")
-        if agg.get("answer_relevance_mean") is not None:
-            print(f"  answer relev. : {agg['answer_relevance_mean']:.2f}")
-    print()
-    print("By category:")
-    for cat, b in agg["by_category"].items():
-        hit_s = f"{(b['hit_at_k'] * 100):.1f}%" if b["hit_at_k"] is not None else "n/a"
-        mrr_s = f"{b['mrr']:.2f}" if b["mrr"] is not None else "n/a"
-        kw_s = f"{(b['keyword_recall'] * 100):.0f}%"
-        print(f"  {cat:<22} n={b['n']:<3} hit@{settings.top_k}={hit_s:<7} MRR={mrr_s:<5} kw={kw_s}")
-    print()
-    print("By language:")
-    for lang, b in agg["by_language"].items():
-        hit_s = f"{(b['hit_at_k'] * 100):.1f}%" if b["hit_at_k"] is not None else "n/a"
-        mrr_s = f"{b['mrr']:.2f}" if b["mrr"] is not None else "n/a"
-        kw_s = f"{(b['keyword_recall'] * 100):.0f}%"
-        print(f"  {lang}  n={b['n']:<3} hit@{settings.top_k}={hit_s:<7} MRR={mrr_s:<5} kw={kw_s}")
+    print(f"Retrieval ({agg['n_scored_hit_mrr']} questions, refusal excluded):")
+    print(f"  passage hit@{k}  : {_pct(agg['passage_hit_at_k_mean'])}   <- the right chunk came back")
+    print(f"  passage MRR     : {_num(agg['passage_mrr_mean'])}")
+    print(f"  file hit@{k}     : {_pct(agg['hit_at_k_mean'])}   <- any chunk from the right file")
+    print(f"  file MRR        : {_num(agg['mrr_mean'])}")
+    print("Answers:")
+    print(f"  keyword recall  : {_pct(agg['keyword_recall_mean'])}  (all rows: {_pct(agg['keyword_recall_mean_all_rows'])})")
+    if agg["refusal_correct_rate"] is not None:
+        n_ok = sum(1 for r in rows if r["category"] == "refusal" and r["refusal_correct"])
+        print(f"  refusal correct : {n_ok}/{agg['n_refusal']}")
+    if ragas_on:
+        print(f"  faithfulness    : {_num(agg['faithfulness_mean'])}  ({agg['n_ragas_scored']} scored, judge {settings.ragas_judge_model})")
+        print(f"  answer relevance: {_num(agg['answer_relevance_mean'])}")
     print()
 
-    # Failures (hit@k == False, non-refusal)
-    failures = [r for r in rows if r["category"] != "refusal" and r["hit_at_k"] is False]
-    if failures:
-        print("Failures (hit@k=0):")
-        for r in failures:
-            preview = ", ".join(r["retrieved_sources"][:3]) or "(none)"
-            qprev = r["question"][:60]
-            print(f"  {r['id']}  [{r['category']}, {r['language']}]  \"{qprev}\"  -> retrieved {preview}")
+    def _print_buckets(title: str, buckets: dict[str, Any]) -> None:
+        print(title)
+        for name, b in buckets.items():
+            print(
+                f"  {name:<22} n={b['n']:<3} passage hit={_pct(b['passage_hit_at_k']):<7} "
+                f"file hit={_pct(b['hit_at_k']):<7} kw={_pct(b['keyword_recall'])}"
+            )
         print()
 
-    # Low-keyword-recall warnings (non-refusal, recall < 0.5)
-    low_kw = [r for r in rows if r["category"] != "refusal" and r["keyword_recall"] < 0.5]
+    _print_buckets("By category:", agg["by_category"])
+    _print_buckets("By language:", agg["by_language"])
+
+    misses = [r for r in rows if r.get("passage_hit_at_k") is False]
+    if misses:
+        print("Passage misses (the answer passage was not retrieved):")
+        for r in misses:
+            print(f"  {r['id']}  [{r['category']}, {r['language']}]  \"{r['question'][:60]}\"")
+        print()
+
+    low_kw = [
+        r for r in rows
+        if r["category"] != "refusal" and r["keyword_recall"] is not None and r["keyword_recall"] < 0.5
+    ]
     if low_kw:
-        print("Low keyword recall (<50%, non-refusal):")
+        print("Low keyword recall (<50%):")
         for r in low_kw:
-            qprev = r["question"][:60]
-            print(f"  {r['id']}  recall={r['keyword_recall']:.2f}  missing={r['keyword_misses']}  q=\"{qprev}\"")
+            print(f"  {r['id']}  recall={r['keyword_recall']:.2f}  missing={r['keyword_misses']}")
         print()
 
     print(f"Output: {out_path}")
@@ -444,12 +521,24 @@ def print_summary(rows: list[dict[str, Any]], agg: dict[str, Any], out_path: Pat
 # ---------------------------------------------------------------------------
 
 
+def _write(out_path: Path, out: dict[str, Any]) -> None:
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the deterministic + optional RAGAS eval.")
-    parser.add_argument("--ragas", action="store_true", help="Also compute RAGAS faithfulness + answer_relevance (slow).")
+    parser.add_argument("--ragas", action="store_true", help="Also compute RAGAS faithfulness + answer relevance (slow).")
+    parser.add_argument(
+        "--retrieval-only",
+        action="store_true",
+        help="Score retrieval only: no LLM, no Ollama, seconds instead of minutes.",
+    )
     parser.add_argument("--qa-path", type=Path, default=DEFAULT_QA_PATH)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     args = parser.parse_args(argv)
+    if args.ragas and args.retrieval_only:
+        parser.error("--ragas needs generated answers; it cannot be combined with --retrieval-only")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -464,39 +553,35 @@ def main(argv: list[str] | None = None) -> int:
 
     # Warm singletons (embedding model, Chroma client, LLM). Per-question
     # chains are resolved by language inside evaluate_question.
-    print("Warming chain (embeddings + Chroma + Ollama)...")
-    get_chain()
-    coll = get_collection()
-    collection_count = coll.count()
+    if args.retrieval_only:
+        print("Retrieval-only mode: no LLM calls, answer metrics are skipped.")
+        get_retriever()
+    else:
+        print("Warming chain (embeddings + vector store + Ollama)...")
+        get_chain()
+    collection_count = get_collection().count()
     print(f"  collection={settings.collection_name} count={collection_count}")
 
-    # Run questions.
     rows: list[dict[str, Any]] = []
     for i, q in enumerate(qa, start=1):
         print(f"  [{i:>2}/{len(qa)}] {q['id']}  ({q['language']}, {q['category']})  {q['question'][:70]}")
-        row = evaluate_question(q)
+        row = evaluate_question(q, retrieval_only=args.retrieval_only)
         rows.append(row)
-        # Progress signal
         if row["category"] == "refusal":
             tag = f"refusal_ok={row['refusal_correct']}"
         else:
-            tag = f"hit={row['hit_at_k']} mrr={row['mrr']:.2f}"
-        print(f"        -> {tag} kw={row['keyword_recall']:.2f} ({row['latency_ms']} ms)")
+            tag = f"passage_rank={row['passage_rank']} file_mrr={row['mrr']:.2f}"
+        kw = "" if row["keyword_recall"] is None else f" kw={row['keyword_recall']:.2f}"
+        print(f"        -> {tag}{kw} ({row['latency_ms']} ms)")
 
-    if args.ragas:
-        print("\nRunning RAGAS faithfulness + answer_relevance (slow, on-demand)...")
-        run_ragas(rows)
-
-    agg = aggregate(rows, ragas_enabled=args.ragas)
-
-    out = {
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    out_path = args.out_dir / f"run_{stamp}.json"
+    out: dict[str, Any] = {
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "config": {
             "top_k": settings.top_k,
             "fetch_k": settings.fetch_k,
             "mmr_lambda": settings.mmr_lambda,
-            # Day 6 deferred item: search_type was missing from the dump, so
-            # Row 6's similarity-vs-MMR run had to be inferred from filenames.
             "search_type": settings.search_type,
             "language_pref_ratio": settings.language_pref_ratio,
             "chunk_size": settings.chunk_size,
@@ -505,18 +590,24 @@ def main(argv: list[str] | None = None) -> int:
             "embedding_model": settings.embedding_model,
             "collection_name": settings.collection_name,
             "collection_count": collection_count,
+            "retrieval_only": bool(args.retrieval_only),
             "ragas_enabled": bool(args.ragas),
+            "ragas_judge_model": settings.ragas_judge_model if args.ragas else None,
         },
-        "aggregates": agg,
+        "aggregates": aggregate(rows, ragas_enabled=False),
         "rows": rows,
     }
+    # Save before RAGAS: a slow or failing judge run must not lose the
+    # generation results it took ~7 minutes to produce.
+    _write(out_path, out)
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    out_path = args.out_dir / f"run_{stamp}.json"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(out, f, indent=2, ensure_ascii=False)
+    if args.ragas:
+        print("\nRunning RAGAS faithfulness + answer relevance (slow, on-demand)...")
+        run_ragas(rows)
+        out["aggregates"] = aggregate(rows, ragas_enabled=True)
+        _write(out_path, out)
 
-    print_summary(rows, agg, out_path, collection_count)
+    print_summary(rows, out["aggregates"], out_path, collection_count)
     return 0
 
 

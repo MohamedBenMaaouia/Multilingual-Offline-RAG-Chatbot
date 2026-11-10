@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     max_tokens: int = 512
     llm_timeout_s: int = 60
 
+    # evaluation — RAGAS LLM-as-judge. Deliberately a different, larger model
+    # than llm_model: a model grading its own answers is a weak judge, and
+    # RAGAS needs reliable structured (JSON) output that 7B models often break.
+    ragas_judge_model: str = "qwen2.5:14b"
+    ragas_judge_num_ctx: int = 8192
+    ragas_judge_timeout_s: int = 600
+
     # api
     cors_origins: list[str] = ["http://localhost:3000"]
     api_host: str = "0.0.0.0"
