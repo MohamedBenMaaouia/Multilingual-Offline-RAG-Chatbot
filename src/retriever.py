@@ -1,101 +1,61 @@
-"""LangChain retriever, wired to the existing Chroma singleton.
+"""Settings-driven retriever over the shared Qdrant collection.
 
-Per ARCHITECTURE.md §4 the default is MMR, configured from ``settings`` so
-the search strategy and its parameters can be swapped via env vars without
-code changes.
+``get_retriever(language)`` returns a ``RagRetriever`` whose fields are a
+snapshot of ``settings`` taken when it is built. The drift-guard test in
+``tests/test_retriever.py`` asserts those fields against ``settings``, so a
+refactor cannot silently run a different strategy than the one configured
+(the Day 2-5 bug: MMR configured, similarity executed).
 
-- ``settings.search_type`` selects ``"mmr"`` (default) or ``"similarity"``.
-- ``settings.top_k`` is always honored.
-- ``settings.fetch_k`` and ``settings.mmr_lambda`` are only consulted when
-  ``search_type == "mmr"``; under similarity search they are intentionally
-  ignored (the parameters have no meaning there).
+Search strategy (``settings.retrieval_mode``)
+----------------------------------------------
+- ``dense``: MiniLM vectors only, ranked by ``search_type`` — MMR (default)
+  or plain similarity.
+- ``hybrid``: dense + BM25 searched together and fused with Reciprocal Rank
+  Fusion inside Qdrant (one query, two prefetches). BM25 matches exact
+  identifiers such as ``P0420`` that the paraphrase-trained embedding model
+  cannot tell apart. MMR does not apply here: langchain-qdrant's MMR uses
+  the dense vector only, so honoring ``search_type="mmr"`` in hybrid mode
+  would quietly drop BM25.
 
-We bind ``langchain_chroma.Chroma`` to the same PersistentClient and
-collection name used by the ingest path, so both paths read/write the
-same collection.
-
-Language-aware retrieval
-------------------------
-``get_retriever(language=...)`` returns a retriever that *prefers* chunks
-tagged with that language without excluding the others. A hard metadata
-filter was rejected: the embedding model is cross-lingual, and in this
-corpus 395 of 470 OBD rows are tagged ``en``, so filtering a French
-request to ``language="fr"`` would hide almost the entire code table.
-
-Instead ``settings.language_pref_ratio`` reserves a share of ``top_k`` for
-same-language chunks and leaves the rest open to anything. With
-``top_k=6`` and ratio 0.67 that is 4 reserved + 2 open.
-
-``get_retriever()`` with no argument returns the plain settings-driven
-``VectorStoreRetriever`` exactly as before — the drift-guard test in
-``tests/test_retriever.py`` asserts against that object.
+Language preference
+-------------------
+``get_retriever(language="fr")`` *prefers* chunks tagged with that language
+without excluding the others. A hard filter was rejected: the embedding
+model is cross-lingual, and 395 of 470 OBD rows are tagged ``en``, so
+filtering a French request to ``fr`` would hide almost the whole code
+table. ``settings.language_pref_ratio`` reserves that share of ``top_k``
+for same-language chunks (6 x 0.67 = 4) and leaves the rest open.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
-from langchain_chroma import Chroma
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
-from langchain_core.runnables import Runnable, RunnableLambda
-from langchain_core.vectorstores import VectorStoreRetriever
+from langchain_core.retrievers import BaseRetriever
+from qdrant_client import models
 
 from src.config import settings
-from src.embeddings import get_embeddings
-from src.vectorstore import get_client
+from src.vectorstore import get_vectorstore
 
-_retriever: Optional[VectorStoreRetriever] = None
-_lang_retrievers: dict[str, Runnable] = {}
-_vectorstore: Optional[Chroma] = None
+_retrievers: dict[Optional[str], "RagRetriever"] = {}
 
 
 def reset_caches() -> None:
-    """Drop every cached handle. Used by tests binding a temp Chroma path."""
-    global _retriever, _vectorstore
-    _retriever = None
-    _vectorstore = None
-    _lang_retrievers.clear()
+    """Drop every cached retriever. Used by tests binding a temp collection."""
+    _retrievers.clear()
 
 
-def _get_vectorstore() -> Chroma:
-    """Return the process-wide Chroma wrapper over the shared client."""
-    global _vectorstore
-    if _vectorstore is None:
-        _vectorstore = Chroma(
-            client=get_client(),
-            collection_name=settings.collection_name,
-            embedding_function=get_embeddings(),
-        )
-    return _vectorstore
-
-
-def _search_kwargs() -> dict:
-    """Search kwargs matching ``settings.search_type``."""
-    if settings.search_type == "mmr":
-        return {
-            "k": settings.top_k,
-            "fetch_k": settings.fetch_k,
-            "lambda_mult": settings.mmr_lambda,
-        }
-    # "similarity" — fetch_k and lambda_mult are not applicable here.
-    return {"k": settings.top_k}
-
-
-def _search(
-    query: str,
-    k: int,
-    metadata_filter: dict | None = None,
-) -> list[Document]:
-    """Run one search honoring ``settings.search_type``, optionally filtered."""
-    vs = _get_vectorstore()
-    if settings.search_type == "mmr":
-        return vs.max_marginal_relevance_search(
-            query,
-            k=k,
-            fetch_k=settings.fetch_k,
-            lambda_mult=settings.mmr_lambda,
-            filter=metadata_filter,
-        )
-    return vs.similarity_search(query, k=k, filter=metadata_filter)
+def _language_filter(language: str | None) -> models.Filter | None:
+    if not language:
+        return None
+    return models.Filter(
+        must=[
+            models.FieldCondition(
+                key="metadata.language", match=models.MatchValue(value=language)
+            )
+        ]
+    )
 
 
 def _merge_unique(*doc_lists: list[Document], limit: int) -> list[Document]:
@@ -118,59 +78,64 @@ def _merge_unique(*doc_lists: list[Document], limit: int) -> list[Document]:
     return merged
 
 
-def _extract_query(payload) -> str:
-    """Normalize the two ways this retriever gets called.
+class RagRetriever(BaseRetriever):
+    """Dense or hybrid search, with an optional same-language preference."""
 
-    ``create_retrieval_chain`` unwraps ``inputs["input"]`` only for objects
-    that are ``BaseRetriever`` instances; anything else (our Runnable) is
-    handed the whole input dict. Direct callers and tests pass a plain
-    string. Accept both rather than depending on that internal detail.
-    """
-    if isinstance(payload, dict):
-        return payload.get("input") or payload.get("query") or ""
-    return payload or ""
+    language: Optional[str] = None
+    retrieval_mode: Literal["dense", "hybrid"]
+    search_type: Literal["mmr", "similarity"]
+    top_k: int
+    fetch_k: int
+    mmr_lambda: float
+    language_pref_ratio: float
+
+    def _search(self, query: str, k: int, language: str | None = None) -> list[Document]:
+        """One search honoring the configured strategy, optionally language-filtered."""
+        vs = get_vectorstore(self.retrieval_mode)
+        qfilter = _language_filter(language)
+        if self.retrieval_mode == "hybrid":
+            return vs.similarity_search(query, k=k, filter=qfilter)
+        if self.search_type == "mmr":
+            return vs.max_marginal_relevance_search(
+                query,
+                k=k,
+                fetch_k=self.fetch_k,
+                lambda_mult=self.mmr_lambda,
+                filter=qfilter,
+            )
+        return vs.similarity_search(query, k=k, filter=qfilter)
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        if not self.language or self.language_pref_ratio <= 0:
+            return self._search(query, self.top_k)
+        # Two searches, merged preferring the language-matched list. The
+        # unfiltered pass keeps cross-language content (English-only code
+        # rows, for example) reachable from a non-English question.
+        n_pref = max(1, min(self.top_k, round(self.top_k * self.language_pref_ratio)))
+        preferred = self._search(query, n_pref, language=self.language)
+        general = self._search(query, self.top_k)
+        return _merge_unique(preferred, general, limit=self.top_k)
 
 
-def _language_preferring_search(payload, language: str) -> list[Document]:
-    """Fill a share of top_k with ``language`` chunks, the rest with anything.
-
-    Two searches, then merge preferring the language-matched list. The
-    unfiltered pass is what keeps cross-language content (English-only code
-    tables, for example) reachable from a non-English question.
-    """
-    query = _extract_query(payload)
-    k = settings.top_k
-    n_pref = max(1, min(k, round(k * settings.language_pref_ratio)))
-    preferred = _search(query, k=n_pref, metadata_filter={"language": language})
-    general = _search(query, k=k, metadata_filter=None)
-    return _merge_unique(preferred, general, limit=k)
-
-
-def get_retriever(language: str | None = None) -> Runnable:
+def get_retriever(language: str | None = None) -> RagRetriever:
     """Return a cached retriever, optionally biased toward ``language``.
 
-    ``language=None`` (default) yields the plain settings-driven
-    ``VectorStoreRetriever`` — unchanged behavior, and the object the
-    configuration drift test inspects.
-
-    A language code yields a ``Runnable`` implementing the preference
-    strategy described in the module docstring. Both are cached; the
-    expensive pieces (Chroma client, embedding model) are singletons, so a
-    per-language entry costs almost nothing.
+    With no language (or ``language_pref_ratio <= 0``) every caller shares
+    the same unbiased retriever. Each language gets its own cached instance;
+    the expensive pieces (Qdrant client, embedding models) are singletons,
+    so an extra entry costs almost nothing.
     """
-    global _retriever
-
-    if language is None or settings.language_pref_ratio <= 0:
-        if _retriever is None:
-            _retriever = _get_vectorstore().as_retriever(
-                search_type=settings.search_type,
-                search_kwargs=_search_kwargs(),
-            )
-        return _retriever
-
-    if language not in _lang_retrievers:
-        _lang_retrievers[language] = RunnableLambda(
-            lambda q, _lang=language: _language_preferring_search(q, _lang),
-            name=f"language_preferring_retriever[{language}]",
+    key = language if language and settings.language_pref_ratio > 0 else None
+    if key not in _retrievers:
+        _retrievers[key] = RagRetriever(
+            language=key,
+            retrieval_mode=settings.retrieval_mode,
+            search_type=settings.search_type,
+            top_k=settings.top_k,
+            fetch_k=settings.fetch_k,
+            mmr_lambda=settings.mmr_lambda,
+            language_pref_ratio=settings.language_pref_ratio,
         )
-    return _lang_retrievers[language]
+    return _retrievers[key]

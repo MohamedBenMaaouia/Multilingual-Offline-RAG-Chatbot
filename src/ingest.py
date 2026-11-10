@@ -1,8 +1,8 @@
-"""Ingestion orchestrator: loaders -> chunker -> embeddings -> ChromaDB.
+"""Ingestion orchestrator: loaders -> chunker -> embeddings -> Qdrant.
 
-Per ARCHITECTURE.md §3. Uses the existing singletons (get_client,
-get_collection, get_embeddings) — does NOT instantiate a second client
-or embedder.
+Per ARCHITECTURE.md §3. Uses the existing singletons in src/vectorstore.py
+— does NOT instantiate a second client or embedder. Each chunk is stored
+with both its dense (MiniLM) and sparse (BM25) vector.
 """
 from __future__ import annotations
 
@@ -11,11 +11,12 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
+from src import chain as _chain
+from src import retriever as _retriever
 from src.chunker import chunk_documents
 from src.config import settings
-from src.embeddings import get_embeddings
 from src.loaders import load_csv, load_markdown, load_pdfs
-from src.vectorstore import _collections, get_client, get_collection
+from src.vectorstore import add_chunks, delete_collection, ensure_collection
 
 
 def _load_all(data_raw: Path) -> list[Document]:
@@ -85,13 +86,12 @@ def ingest(paths: list[Path] | None = None, wipe_first: bool = False) -> dict:
     t0 = time.perf_counter()
 
     if wipe_first:
-        client = get_client()
-        try:
-            client.delete_collection(name=settings.collection_name)
-        except Exception:  # noqa: BLE001 — collection may not exist yet
-            pass
-        # Drop the cached handle so the next get_collection call rebuilds it.
-        _collections.pop(settings.collection_name, None)
+        delete_collection()
+        # Retrievers and chains hold vector-store handles; rebuild them so a
+        # running API keeps working after POST /ingest {"wipe_first": true}.
+        _retriever.reset_caches()
+        _chain.reset_caches()
+    ensure_collection()
 
     if paths is None:
         docs = _load_all(settings.data_raw_path)
@@ -110,26 +110,7 @@ def ingest(paths: list[Path] | None = None, wipe_first: bool = False) -> dict:
             "duration_seconds": round(time.perf_counter() - t0, 3),
         }
 
-    embedder = get_embeddings()
-    collection = get_collection()
-
-    texts = [c.page_content for c in chunks]
-    metadatas = [c.metadata for c in chunks]
-    ids = [c.metadata["chunk_id"] for c in chunks]
-
-    vectors = embedder.embed_documents(texts)
-
-    # Chroma caps a single .add() at ~5461 items on most setups; insert in
-    # safe batches so large corpora (full F-150 manuals + 3k OBD rows) load.
-    BATCH = 4000
-    for start in range(0, len(ids), BATCH):
-        end = start + BATCH
-        collection.add(
-            ids=ids[start:end],
-            embeddings=vectors[start:end],
-            metadatas=metadatas[start:end],
-            documents=texts[start:end],
-        )
+    add_chunks(chunks)
 
     return {
         "documents_loaded": documents_loaded,

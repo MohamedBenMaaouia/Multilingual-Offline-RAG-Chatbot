@@ -2,8 +2,8 @@
 
 Uses fastapi.testclient.TestClient against the FastAPI app. The LLM is
 mocked via the ``mock_llm`` fixture (which patches langchain_ollama
-ChatOllama.invoke/ainvoke at the class level). Chroma is isolated via
-``tmp_chroma``.
+ChatOllama.invoke/ainvoke at the class level). Qdrant is isolated via
+``tmp_qdrant``.
 """
 from __future__ import annotations
 
@@ -11,8 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.embeddings import get_embeddings
-from src.vectorstore import get_collection
+from src.vectorstore import add_chunks, ensure_collection
 
 
 # ---------------------------------------------------------------------------
@@ -21,13 +20,7 @@ from src.vectorstore import get_collection
 
 
 def _ingest_sample_docs(sample_docs):
-    coll = get_collection()
-    embedder = get_embeddings()
-    texts = [d.page_content for d in sample_docs]
-    metadatas = [d.metadata for d in sample_docs]
-    ids = [d.metadata["chunk_id"] for d in sample_docs]
-    vectors = embedder.embed_documents(texts)
-    coll.add(ids=ids, embeddings=vectors, metadatas=metadatas, documents=texts)
+    add_chunks(sample_docs)
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +28,7 @@ def _ingest_sample_docs(sample_docs):
 # ---------------------------------------------------------------------------
 
 
-def test_chat_returns_mocked_answer_with_sources(tmp_chroma, sample_docs, mock_llm):
+def test_chat_returns_mocked_answer_with_sources(tmp_qdrant, sample_docs, mock_llm):
     """End-to-end /chat with real embeddings + retrieval but mocked LLM."""
     _ingest_sample_docs(sample_docs)
     client = TestClient(app)
@@ -58,11 +51,10 @@ def test_chat_returns_mocked_answer_with_sources(tmp_chroma, sample_docs, mock_l
         assert src["page"] != -1, "page=-1 sentinel leaked past the API boundary"
 
 
-def test_chat_empty_collection_returns_canned_refusal(tmp_chroma, mock_llm):
+def test_chat_empty_collection_returns_canned_refusal(tmp_qdrant, mock_llm):
     """If the collection is empty the API short-circuits with the canned line."""
-    # tmp_chroma already gave us a fresh empty collection.
-    # Just touch it once so it exists.
-    _ = get_collection()
+    # tmp_qdrant already gave us a fresh empty store; create the collection.
+    ensure_collection()
     client = TestClient(app)
     resp = client.post("/chat", json={"question": "anything at all"})
     assert resp.status_code == 200, resp.text
@@ -74,7 +66,7 @@ def test_chat_empty_collection_returns_canned_refusal(tmp_chroma, mock_llm):
     assert body["retrieved_k"] == 0
 
 
-def test_chat_short_question_rejected_by_pydantic(tmp_chroma, mock_llm):
+def test_chat_short_question_rejected_by_pydantic(tmp_qdrant, mock_llm):
     """ChatRequest.question has min_length=3 — shorter inputs → 422."""
     client = TestClient(app)
     resp = client.post("/chat", json={"question": "hi"})
@@ -86,16 +78,16 @@ def test_chat_short_question_rejected_by_pydantic(tmp_chroma, mock_llm):
 # ---------------------------------------------------------------------------
 
 
-def test_health_returns_schema_with_chroma_ok(tmp_chroma):
+def test_health_returns_schema_with_vectorstore_ok(tmp_qdrant):
     """/health never raises — exposes per-component flags."""
     client = TestClient(app)
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) >= {"status", "chroma_ok", "ollama_ok", "collection_size"}
-    assert isinstance(body["chroma_ok"], bool)
+    assert set(body.keys()) >= {"status", "vectorstore_ok", "ollama_ok", "collection_size"}
+    assert isinstance(body["vectorstore_ok"], bool)
     assert isinstance(body["ollama_ok"], bool)
     assert isinstance(body["collection_size"], int)
     assert body["status"] in {"ok", "degraded"}
-    # Chroma should be reachable since tmp_chroma created the dir.
-    assert body["chroma_ok"] is True
+    # The vector store should be reachable since tmp_qdrant created the dir.
+    assert body["vectorstore_ok"] is True

@@ -2,10 +2,9 @@
 
 Three core fixtures:
 
-- ``tmp_chroma``  — function-scoped temp directory bound to
-  ``settings.chroma_path``; resets the ``src.vectorstore`` singletons and
-  the ``src.retriever`` singleton so the test process actually uses the
-  temp dir. Teardown restores the original path and clears caches again.
+- ``tmp_qdrant``  — function-scoped embedded-Qdrant directory bound to
+  ``settings.qdrant_path``; closes the client and resets the vectorstore,
+  retriever and chain caches so the test actually uses the temp dir.
 - ``sample_docs`` — three inline LangChain ``Document`` objects covering
   the three doc_types (manual / obd_code / faq) with full metadata.
 - ``mock_llm``   — patches ``ChatOllama.invoke`` (and ``ainvoke``) where
@@ -95,40 +94,36 @@ def _materialize_fixtures():
 
 
 # --------------------------------------------------------------------------
-# tmp_chroma — isolated ChromaDB per test
+# tmp_qdrant — isolated embedded Qdrant per test
 # --------------------------------------------------------------------------
 
 
-@pytest.fixture
-def tmp_chroma(tmp_path_factory, monkeypatch):
-    """Yield a Path to a freshly-allocated Chroma directory bound to settings.
-
-    Resets the vectorstore singletons (``_client``, ``_collections``) and
-    the retriever singleton so subsequent ``get_client()`` / ``get_collection()``
-    / ``get_retriever()`` calls re-open under the temp path. On teardown the
-    singletons are cleared again so the next test/process sees a clean slate.
-    """
-    tmp_dir = tmp_path_factory.mktemp("chroma")
-    monkeypatch.setattr(settings, "chroma_path", tmp_dir)
-
-    # Drop any cached client/collection so the new path takes effect.
-    vectorstore._client = None
-    vectorstore._collections.clear()
-
-    # Also drop the retriever caches — they capture a Chroma handle. The
-    # chain caches wrap a retriever, so they have to go too.
+def _reset_store_caches() -> None:
+    """Close the Qdrant client and drop every handle built on top of it."""
     from src import chain as chain_mod
     from src import retriever as retriever_mod
+
+    vectorstore.reset_caches()
     retriever_mod.reset_caches()
     chain_mod.reset_caches()
+
+
+@pytest.fixture
+def tmp_qdrant(tmp_path_factory, monkeypatch):
+    """Yield a fresh embedded-Qdrant directory bound to settings.
+
+    Forces embedded mode (``qdrant_url=None``) and closes any open client so
+    ``get_client()`` / ``get_retriever()`` / ``get_chain()`` re-open under the
+    temp path. Teardown closes the client again, releasing the folder lock.
+    """
+    tmp_dir = tmp_path_factory.mktemp("qdrant")
+    monkeypatch.setattr(settings, "qdrant_path", tmp_dir)
+    monkeypatch.setattr(settings, "qdrant_url", None)
+    _reset_store_caches()
 
     yield tmp_dir
 
-    # Teardown: clear singletons so no stale handle leaks into the next test.
-    vectorstore._client = None
-    vectorstore._collections.clear()
-    retriever_mod.reset_caches()
-    chain_mod.reset_caches()
+    _reset_store_caches()
 
 
 # --------------------------------------------------------------------------

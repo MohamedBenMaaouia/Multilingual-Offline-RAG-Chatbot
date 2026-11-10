@@ -1,12 +1,16 @@
 from pydantic_settings import BaseSettings
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 
 class Settings(BaseSettings):
     # paths
     data_raw_path: Path = Path("./data/raw")
-    chroma_path: Path = Path("./data/chroma")
+
+    # vector store — Qdrant. Embedded (local folder) unless qdrant_url is set.
+    qdrant_path: Path = Path("./data/qdrant")
+    qdrant_url: Optional[str] = None
+    qdrant_api_key: Optional[str] = None
 
     # ingestion
     chunk_size: int = 800
@@ -16,8 +20,19 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     collection_name: str = "kb_auto"
 
+    # sparse (BM25) encoder for hybrid search — FastEmbed model name
+    sparse_model: str = "Qdrant/bm25"
+
     # retrieval
+    # "dense": MiniLM vectors only, ranked by search_type (mmr | similarity).
+    # "hybrid": dense + BM25 searched together, fused with RRF in Qdrant;
+    #           search_type and mmr_lambda do not apply (MMR is dense-only).
+    # Hybrid is the default since Nov 2026: passage hit@6 40% -> 80% and
+    # diagnostic-code questions 0/6 -> 6/6 on the eval set.
+    retrieval_mode: Literal["dense", "hybrid"] = "hybrid"
     top_k: int = 6
+    # Candidate pool considered before the final top_k is chosen — by MMR in
+    # dense mode, or by the cross-encoder when reranking is on.
     fetch_k: int = 30
     mmr_lambda: float = 0.5
     search_type: Literal["mmr", "similarity"] = "mmr"

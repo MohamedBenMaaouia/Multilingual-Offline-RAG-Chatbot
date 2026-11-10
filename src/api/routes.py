@@ -28,7 +28,7 @@ from src.chain import get_chain
 from src.config import settings
 from src.ingest import ingest as run_ingest
 from src.language import language_name, resolve_language
-from src.vectorstore import get_collection
+from src.vectorstore import count_chunks
 
 router = APIRouter()
 
@@ -56,9 +56,9 @@ def chat(request: ChatRequest) -> ChatResponse:
     """Submit a question, get a grounded answer with sources."""
     # Cheap pre-check: empty collection → canned refusal, no LLM call.
     try:
-        collection_size = get_collection().count()
+        collection_size = count_chunks()
     except Exception:
-        print("ChromaDB error during /chat pre-check:", file=sys.stderr)
+        print("Vector store error during /chat pre-check:", file=sys.stderr)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Retrieval error")
 
@@ -130,13 +130,13 @@ def chat(request: ChatRequest) -> ChatResponse:
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     """Liveness probe. Never raises — degradations become False flags."""
-    chroma_ok = False
+    vectorstore_ok = False
     collection_size = 0
     try:
-        collection_size = get_collection().count()
-        chroma_ok = True
+        collection_size = count_chunks()
+        vectorstore_ok = True
     except Exception as exc:
-        print(f"/health chroma check failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"/health vector store check failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
     ollama_ok = False
     try:
@@ -146,10 +146,10 @@ def health() -> HealthResponse:
     except Exception as exc:
         print(f"/health ollama check failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
-    status = "ok" if (chroma_ok and ollama_ok) else "degraded"
+    status = "ok" if (vectorstore_ok and ollama_ok) else "degraded"
     return HealthResponse(
         status=status,
-        chroma_ok=chroma_ok,
+        vectorstore_ok=vectorstore_ok,
         ollama_ok=ollama_ok,
         collection_size=collection_size,
     )

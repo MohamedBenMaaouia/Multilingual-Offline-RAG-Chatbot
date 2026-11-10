@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "multilingual-rag-chatbot"
 version = "0.1.0"
-description = "Laptop-runnable offline multilingual RAG chatbot. LangChain + ChromaDB + Ollama + FastAPI."
+description = "Laptop-runnable offline multilingual RAG chatbot. LangChain + Qdrant (hybrid dense + BM25) + Ollama + FastAPI."
 requires-python = ">=3.11"
 readme = "README.md"
 
@@ -13,12 +13,12 @@ dependencies = [
   # LangChain core + integrations
   "langchain>=0.3.0,<0.4",
   "langchain-community>=0.3.0,<0.4",
-  "langchain-chroma>=0.2.0,<0.3",
+  "langchain-qdrant>=0.2,<0.3",
   "langchain-huggingface>=0.1,<0.3",
   "langchain-ollama>=0.2,<0.4",
 
-  # Vector store
-  "chromadb>=0.5.0,<0.7",
+  # Vector store — Qdrant (embedded or server); fastembed provides the BM25 sparse encoder
+  "qdrant-client[fastembed]>=1.12,<2",
 
   # Embeddings
   "sentence-transformers>=3.0.0,<6",

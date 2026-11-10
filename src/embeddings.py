@@ -2,7 +2,7 @@
 
 Per ARCHITECTURE.md §3 (embedding model section):
 - Model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 (384-dim)
-- Cosine similarity is set on the Chroma collection — so L2-normalize the
+- Cosine distance is set on the Qdrant dense vector — so L2-normalize the
   vectors via encode_kwargs={"normalize_embeddings": True} to keep cosine
   distance well-behaved.
 - CPU device by default (laptop-targeted POC).

@@ -33,7 +33,7 @@ class ChatResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
-    chroma_ok: bool
+    vectorstore_ok: bool
     ollama_ok: bool
     collection_size: int
 

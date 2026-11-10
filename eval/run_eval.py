@@ -53,7 +53,7 @@ from src.chain import get_chain
 from src.config import settings
 from src.language import language_name, resolve_language
 from src.retriever import get_retriever
-from src.vectorstore import get_collection
+from src.vectorstore import count_chunks
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -466,7 +466,8 @@ def print_summary(rows: list[dict[str, Any]], agg: dict[str, Any], out_path: Pat
     print(f"=== RAG eval — {ts_utc} ===")
     print(
         f"Corpus: {collection_count} chunks  |  Model: {settings.llm_model}  |  "
-        f"search: {settings.search_type}, k={k}  |  RAGAS: {'on' if ragas_on else 'off'}"
+        f"search: {settings.retrieval_mode}/{settings.search_type}, k={k}  |  "
+        f"RAGAS: {'on' if ragas_on else 'off'}"
     )
     print()
     print(f"Retrieval ({agg['n_scored_hit_mrr']} questions, refusal excluded):")
@@ -551,7 +552,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Loaded {len(qa)} questions from {args.qa_path}")
 
-    # Warm singletons (embedding model, Chroma client, LLM). Per-question
+    # Warm singletons (embedding models, Qdrant client, LLM). Per-question
     # chains are resolved by language inside evaluate_question.
     if args.retrieval_only:
         print("Retrieval-only mode: no LLM calls, answer metrics are skipped.")
@@ -559,7 +560,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("Warming chain (embeddings + vector store + Ollama)...")
         get_chain()
-    collection_count = get_collection().count()
+    collection_count = count_chunks()
     print(f"  collection={settings.collection_name} count={collection_count}")
 
     rows: list[dict[str, Any]] = []
@@ -582,6 +583,8 @@ def main(argv: list[str] | None = None) -> int:
             "top_k": settings.top_k,
             "fetch_k": settings.fetch_k,
             "mmr_lambda": settings.mmr_lambda,
+            "vector_store": "qdrant",
+            "retrieval_mode": settings.retrieval_mode,
             "search_type": settings.search_type,
             "language_pref_ratio": settings.language_pref_ratio,
             "chunk_size": settings.chunk_size,

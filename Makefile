@@ -19,4 +19,4 @@ test:
 	pytest -m "not requires_llm" -v
 
 reset-db:
-	rm -rf data/chroma/* && touch data/chroma/.gitkeep
+	bash scripts/reset_db.sh

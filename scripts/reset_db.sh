@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
+# Delete the embedded Qdrant store (all collections). Stop the API first:
+# embedded Qdrant locks data/qdrant/ while a process has it open.
 set -euo pipefail
 
-CHROMA_DIR="./data/chroma"
+QDRANT_DIR="./data/qdrant"
 
-if [ -d "${CHROMA_DIR}" ]; then
-    echo "==> Removing existing ${CHROMA_DIR}..."
-    rm -rf "${CHROMA_DIR}"
+if [ -d "${QDRANT_DIR}" ]; then
+    echo "==> Removing existing ${QDRANT_DIR}..."
+    rm -rf "${QDRANT_DIR}"
 fi
 
-mkdir -p "${CHROMA_DIR}"
-touch "${CHROMA_DIR}/.gitkeep"
+mkdir -p "${QDRANT_DIR}"
+touch "${QDRANT_DIR}/.gitkeep"
 
-echo "[OK] Chroma DB reset at ${CHROMA_DIR}"
+echo "[OK] Qdrant store reset at ${QDRANT_DIR}"

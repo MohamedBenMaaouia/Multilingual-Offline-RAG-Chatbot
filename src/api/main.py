@@ -1,7 +1,7 @@
 """FastAPI app entrypoint.
 
 Wires the §5 router behind CORS with a lifespan that warms the
-embedding model + Chroma client and probes Ollama. Never crashes
+embedding models + Qdrant store and probes Ollama. Never crashes
 startup if Ollama is down — /health surfaces it and /chat returns 503
 lazily.
 """
@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.routes import router
 from src.config import settings
 from src.embeddings import get_embeddings
-from src.vectorstore import get_collection
+from src.vectorstore import get_sparse_embeddings, get_vectorstore, reset_caches
 
 
 @asynccontextmanager
@@ -25,16 +25,19 @@ async def lifespan(app: FastAPI):
     # Warm singletons so first /chat doesn't pay the cold-start tax.
     try:
         get_embeddings()
+        get_sparse_embeddings()
     except Exception as exc:
         print(
             f"WARN: embedding warmup failed: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
     try:
-        get_collection()
+        get_vectorstore()
     except Exception as exc:
+        # Embedded Qdrant locks its folder: this fails if another process
+        # (ingest, eval) has data/qdrant open.
         print(
-            f"WARN: chroma warmup failed: {type(exc).__name__}: {exc}",
+            f"WARN: vector store warmup failed: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
     # Probe Ollama but never crash startup on its account.
@@ -55,6 +58,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Release the embedded-Qdrant folder lock so ingest/eval can open it.
+    reset_caches()
     print("API shutting down.")
 
 

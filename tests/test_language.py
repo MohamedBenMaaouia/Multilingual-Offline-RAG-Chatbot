@@ -11,7 +11,6 @@ import pytest
 from langchain_core.documents import Document
 
 from src.config import settings
-from src.embeddings import get_embeddings
 from src.language import (
     DEFAULT_LANGUAGE,
     detect_language,
@@ -19,7 +18,7 @@ from src.language import (
     resolve_language,
 )
 from src.retriever import get_retriever
-from src.vectorstore import get_collection
+from src.vectorstore import add_chunks
 
 
 # ---------------------------------------------------------------------------
@@ -110,17 +109,10 @@ def bilingual_docs() -> list[Document]:
 
 
 def _ingest(docs):
-    collection = get_collection()
-    embedder = get_embeddings()
-    collection.add(
-        ids=[d.metadata["chunk_id"] for d in docs],
-        embeddings=embedder.embed_documents([d.page_content for d in docs]),
-        metadatas=[d.metadata for d in docs],
-        documents=[d.page_content for d in docs],
-    )
+    add_chunks(docs)
 
 
-def test_french_request_prefers_french_chunks(tmp_chroma, bilingual_docs):
+def test_french_request_prefers_french_chunks(tmp_qdrant, bilingual_docs):
     """A French-biased retriever must surface more French chunks than the default one."""
     _ingest(bilingual_docs)
     question = "Comment vérifier le niveau d'huile moteur ?"
@@ -137,7 +129,7 @@ def test_french_request_prefers_french_chunks(tmp_chroma, bilingual_docs):
     assert n_fr_biased >= 2, f"expected both French chunks, got {n_fr_biased}"
 
 
-def test_language_bias_still_reaches_other_language_content(tmp_chroma, bilingual_docs):
+def test_language_bias_still_reaches_other_language_content(tmp_qdrant, bilingual_docs):
     """The reserved share is partial — an English-only code row stays reachable in FR.
 
     This is why a hard metadata filter was rejected: 395 of 470 real OBD rows
@@ -151,19 +143,19 @@ def test_language_bias_still_reaches_other_language_content(tmp_chroma, bilingua
     )
 
 
-def test_language_retriever_respects_top_k(tmp_chroma, bilingual_docs):
+def test_language_retriever_respects_top_k(tmp_qdrant, bilingual_docs):
     _ingest(bilingual_docs)
     hits = get_retriever("fr").invoke("huile moteur")
     assert len(hits) <= settings.top_k
 
 
-def test_language_retrievers_are_cached_per_language(tmp_chroma):
+def test_language_retrievers_are_cached_per_language(tmp_qdrant):
     assert get_retriever("fr") is get_retriever("fr")
     assert get_retriever("fr") is not get_retriever("en")
     assert get_retriever("fr") is not get_retriever()
 
 
-def test_ratio_zero_disables_language_bias(tmp_chroma, monkeypatch):
+def test_ratio_zero_disables_language_bias(tmp_qdrant, monkeypatch):
     """language_pref_ratio=0 must fall back to the plain settings retriever."""
     monkeypatch.setattr(settings, "language_pref_ratio", 0.0)
     assert get_retriever("fr") is get_retriever()
@@ -190,7 +182,7 @@ def _capture_chain_call(mocker, sample_docs):
     return get_chain_mock, chain_mock
 
 
-def test_chat_request_language_actually_reaches_the_chain(tmp_chroma, sample_docs, mocker):
+def test_chat_request_language_actually_reaches_the_chain(tmp_qdrant, sample_docs, mocker):
     """The dead-parameter guard.
 
     ``ChatRequest.language`` was accepted and silently ignored for the whole
@@ -217,7 +209,7 @@ def test_chat_request_language_actually_reaches_the_chain(tmp_chroma, sample_doc
     assert chain_mock.invoke.call_args[0][0]["answer_language"] == "French"
 
 
-def test_auto_language_reaches_the_chain_from_question_text(tmp_chroma, sample_docs, mocker):
+def test_auto_language_reaches_the_chain_from_question_text(tmp_qdrant, sample_docs, mocker):
     """With the default "auto", the detected language must drive both knobs."""
     from fastapi.testclient import TestClient
 

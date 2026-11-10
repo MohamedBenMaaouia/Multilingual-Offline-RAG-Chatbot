@@ -9,7 +9,7 @@ All loaders normalize metadata to the project schema:
     {source, page, doc_type, language, chunk_id}
 where `source` is RELATIVE to settings.data_raw_path and `page` is `-1`
 sentinel when the source type has no page concept (CSV, MD). `None` is
-NEVER written into metadata — Chroma rejects it.
+NEVER written into metadata (the convention dates from ChromaDB, which rejects None; the API still normalizes -1 to null).
 
 Language is auto-detected per-Document via `_detect_language` (langdetect)
 on the first 500 chars of page_content. Defaults to 'en' on any error.

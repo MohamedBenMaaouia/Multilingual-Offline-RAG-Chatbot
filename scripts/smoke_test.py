@@ -199,9 +199,9 @@ def main() -> int:
     print(f"      ingest result: {ingest_result}")
 
     # Sanity check the collection has rows.
-    from src.vectorstore import get_collection
+    from src.vectorstore import count_chunks
 
-    coll_count = get_collection().count()
+    coll_count = count_chunks()
     print(f"      collection count: {coll_count}")
     if coll_count == 0:
         print("[FAIL] collection is empty after ingest")

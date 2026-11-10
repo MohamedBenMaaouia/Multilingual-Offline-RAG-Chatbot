@@ -8,6 +8,8 @@ data/raw/*
 !data/raw/.gitkeep
 data/chroma/*
 !data/chroma/.gitkeep
+data/qdrant/*
+!data/qdrant/.gitkeep
 
 # Eval run artifacts
 eval/results/*
