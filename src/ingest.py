@@ -11,6 +11,7 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
+from src import cache as answer_cache
 from src import chain as _chain
 from src import retriever as _retriever
 from src.chunker import chunk_documents
@@ -111,6 +112,8 @@ def ingest(paths: list[Path] | None = None, wipe_first: bool = False) -> dict:
         }
 
     add_chunks(chunks)
+    # Cached answers were built from the previous corpus.
+    answer_cache.invalidate()
 
     return {
         "documents_loaded": documents_loaded,

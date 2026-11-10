@@ -20,10 +20,10 @@ from src.config import settings
 from src.retriever import get_retriever
 from src.vectorstore import (
     DENSE_VECTOR,
-    SPARSE_VECTOR,
     add_chunks,
     ensure_collection,
     get_client,
+    sparse_vector_names,
 )
 
 
@@ -68,13 +68,38 @@ def test_hybrid_mode_never_runs_mmr(tmp_qdrant, monkeypatch, mocker):
 # ---------------------------------------------------------------------------
 
 
-def test_collection_has_dense_and_idf_weighted_bm25_vectors(tmp_qdrant):
-    """BM25 without the IDF modifier degrades to term counting."""
+def test_collection_has_dense_and_idf_weighted_bm25_per_language(tmp_qdrant):
+    """One BM25 vector per language; without the IDF modifier BM25 degrades to term counting."""
     coll = ensure_collection()
     params = get_client().get_collection(coll).config.params
     assert params.vectors[DENSE_VECTOR].size == 384
     assert params.vectors[DENSE_VECTOR].distance == models.Distance.COSINE
-    assert params.sparse_vectors[SPARSE_VECTOR].modifier == models.Modifier.IDF
+    assert set(sparse_vector_names()) == {"bm25_en", "bm25_fr"}
+    for name in sparse_vector_names():
+        assert params.sparse_vectors[name].modifier == models.Modifier.IDF
+
+
+def test_old_single_bm25_collection_is_rejected_with_reingest_hint(tmp_qdrant):
+    """A pre-per-language collection must fail loudly, not on a missing vector mid-query."""
+    get_client().create_collection(
+        collection_name=settings.collection_name,
+        vectors_config={DENSE_VECTOR: models.VectorParams(size=384, distance=models.Distance.COSINE)},
+        sparse_vectors_config={"bm25": models.SparseVectorParams(modifier=models.Modifier.IDF)},
+    )
+    with pytest.raises(RuntimeError, match="Re-ingest"):
+        ensure_collection()
+
+
+@pytest.mark.parametrize("per_language,expected", [(True, "bm25_fr"), (False, "bm25_en")])
+def test_french_question_uses_french_bm25(tmp_qdrant, monkeypatch, per_language, expected):
+    """BM25 tokenization follows the question's language unless switched off."""
+    monkeypatch.setattr(settings, "retrieval_mode", "hybrid")
+    monkeypatch.setattr(settings, "bm25_per_language", per_language)
+    from src import vectorstore
+
+    r = get_retriever("fr")
+    store = vectorstore.get_vectorstore("hybrid", r._bm25_language())
+    assert store.sparse_vector_name == expected
 
 
 # ---------------------------------------------------------------------------

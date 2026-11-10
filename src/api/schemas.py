@@ -29,6 +29,9 @@ class ChatResponse(BaseModel):
     sources: list[SourceRef]
     latency_ms: int
     retrieved_k: int
+    # Set when the answer came from the Redis cache (src/cache.py); additive,
+    # null for freshly generated answers.
+    cache_hit: Literal["exact", "semantic"] | None = None
 
 
 class HealthResponse(BaseModel):

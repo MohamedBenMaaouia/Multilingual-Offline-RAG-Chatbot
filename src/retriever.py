@@ -36,6 +36,7 @@ from langchain_core.retrievers import BaseRetriever
 from qdrant_client import models
 
 from src.config import settings
+from src.language import DEFAULT_LANGUAGE
 from src.vectorstore import get_vectorstore
 
 _retrievers: dict[Optional[str], "RagRetriever"] = {}
@@ -89,6 +90,11 @@ class RagRetriever(BaseRetriever):
     mmr_lambda: float
     language_pref_ratio: float
     rerank: bool = False
+    bm25_per_language: bool = True
+
+    def _bm25_language(self) -> str:
+        """Tokenization rules for the BM25 half of hybrid search."""
+        return self.language if self.bm25_per_language and self.language else DEFAULT_LANGUAGE
 
     def _n_preferred(self) -> int:
         """Slots of top_k reserved for the request language (0 = no preference)."""
@@ -98,7 +104,7 @@ class RagRetriever(BaseRetriever):
 
     def _search(self, query: str, k: int, language: str | None = None) -> list[Document]:
         """One search honoring the configured strategy, optionally language-filtered."""
-        vs = get_vectorstore(self.retrieval_mode)
+        vs = get_vectorstore(self.retrieval_mode, self._bm25_language())
         qfilter = _language_filter(language)
         if self.retrieval_mode == "hybrid":
             return vs.similarity_search(query, k=k, filter=qfilter)
@@ -166,5 +172,6 @@ def get_retriever(language: str | None = None) -> RagRetriever:
             mmr_lambda=settings.mmr_lambda,
             language_pref_ratio=settings.language_pref_ratio,
             rerank=settings.reranker_enabled,
+            bm25_per_language=settings.bm25_per_language,
         )
     return _retrievers[key]

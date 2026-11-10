@@ -585,6 +585,7 @@ def main(argv: list[str] | None = None) -> int:
             "mmr_lambda": settings.mmr_lambda,
             "vector_store": "qdrant",
             "retrieval_mode": settings.retrieval_mode,
+            "bm25_per_language": settings.bm25_per_language,
             "reranker_model": settings.reranker_model if settings.reranker_enabled else None,
             "search_type": settings.search_type,
             "language_pref_ratio": settings.language_pref_ratio,

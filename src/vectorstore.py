@@ -1,16 +1,22 @@
 """Qdrant client, collection and vector-store helpers.
 
-One collection holds two vectors per chunk:
+One collection holds, per chunk, one dense vector and one sparse BM25 vector
+per supported language:
 
-- ``dense``  — the MiniLM embedding (384 dims, cosine). Semantic matching,
+- ``dense``    — the MiniLM embedding (384 dims, cosine). Semantic matching,
   cross-lingual.
-- ``bm25``   — a sparse BM25 vector (FastEmbed ``Qdrant/bm25``). Exact-term
-  matching, which is what identifiers like ``P0420`` need. The sparse
-  vector is created with ``modifier=IDF`` so Qdrant applies inverse document
-  frequency at query time; without it BM25 degrades to term counting.
+- ``bm25_en``, ``bm25_fr`` — sparse BM25 vectors (FastEmbed ``Qdrant/bm25``)
+  of the SAME text, tokenized with English and French rules respectively
+  (stemmer + stopword list). Exact-term matching, which identifiers like
+  ``P0420`` need. A query is encoded with its own language's rules and
+  matched against that language's vector, so both sides of the comparison
+  are always tokenized the same way. Identifiers tokenize identically under
+  both. Each sparse vector has ``modifier=IDF`` so Qdrant applies inverse
+  document frequency at query time; without it BM25 degrades to term counting.
 
-Both vectors are always written, so ``settings.retrieval_mode`` can switch
-between dense and hybrid search without re-ingesting.
+All vectors are always written, so ``settings.retrieval_mode`` can switch
+between dense and hybrid search without re-ingesting. Adding a language is
+one entry in ``_STEMMER_LANGUAGE`` plus a re-ingest.
 
 Connection: embedded local mode (``QdrantClient(path=...)``) unless
 ``settings.qdrant_url`` is set, in which case a Qdrant server is used. The
@@ -18,9 +24,10 @@ code is identical either way. Embedded mode locks its folder: only ONE
 process may open it at a time, so stop the API before running ingest or
 eval from another terminal (or run a server and set QDRANT_URL).
 
-We create the collection ourselves instead of letting langchain-qdrant do
-it, for two reasons: langchain-qdrant omits the IDF modifier, and its
-factory methods open a second client, which embedded mode's lock forbids.
+We create the collection and write points ourselves instead of letting
+langchain-qdrant do it: it omits the IDF modifier, writes only one sparse
+vector per point, and its factory methods open a second client, which
+embedded mode's lock forbids. Queries still go through ``QdrantVectorStore``.
 
 The ``page=-1`` "no page" sentinel is kept even though Qdrant accepts null:
 the API boundary (src/api/routes.py) normalizes -1 to null, unchanged.
@@ -36,18 +43,35 @@ from qdrant_client import QdrantClient, models
 
 from src.config import settings
 from src.embeddings import get_embeddings
+from src.language import DEFAULT_LANGUAGE
 
 DENSE_VECTOR = "dense"
-SPARSE_VECTOR = "bm25"
 EMBEDDING_DIM = 384  # paraphrase-multilingual-MiniLM-L12-v2
+
+# Language code -> FastEmbed BM25 language (stemmer + stopwords).
+_STEMMER_LANGUAGE = {"en": "english", "fr": "french"}
+
+# Payload keys langchain-qdrant reads documents back from.
+_CONTENT_KEY = "page_content"
+_METADATA_KEY = "metadata"
 
 # Metadata fields filtered on at query time get a payload index (a no-op in
 # embedded mode, real indexes on a server).
 _INDEXED_FIELDS = ("metadata.language", "metadata.doc_type")
 
 _client: Optional[QdrantClient] = None
-_sparse: Optional[FastEmbedSparse] = None
-_stores: dict[str, QdrantVectorStore] = {}
+_sparse: dict[str, FastEmbedSparse] = {}
+_stores: dict[tuple[str, str], QdrantVectorStore] = {}
+
+
+def sparse_vector_name(language: str) -> str:
+    """Name of the BM25 vector for ``language`` (unsupported -> default language)."""
+    lang = language if language in _STEMMER_LANGUAGE else DEFAULT_LANGUAGE
+    return f"bm25_{lang}"
+
+
+def sparse_vector_names() -> list[str]:
+    return [sparse_vector_name(lang) for lang in _STEMMER_LANGUAGE]
 
 
 def get_client() -> QdrantClient:
@@ -62,12 +86,14 @@ def get_client() -> QdrantClient:
     return _client
 
 
-def get_sparse_embeddings() -> FastEmbedSparse:
-    """Return the process-wide BM25 sparse encoder."""
-    global _sparse
-    if _sparse is None:
-        _sparse = FastEmbedSparse(model_name=settings.sparse_model)
-    return _sparse
+def get_sparse_embeddings(language: str = DEFAULT_LANGUAGE) -> FastEmbedSparse:
+    """Return the process-wide BM25 encoder for ``language``."""
+    lang = language if language in _STEMMER_LANGUAGE else DEFAULT_LANGUAGE
+    if lang not in _sparse:
+        _sparse[lang] = FastEmbedSparse(
+            model_name=settings.sparse_model, language=_STEMMER_LANGUAGE[lang]
+        )
+    return _sparse[lang]
 
 
 def reset_caches() -> None:
@@ -83,27 +109,40 @@ def reset_caches() -> None:
 
 
 def ensure_collection(name: str | None = None) -> str:
-    """Create the collection (dense + BM25 vectors) if it does not exist."""
+    """Create the collection (dense + one BM25 vector per language) if missing.
+
+    An existing collection built with an older layout (e.g. a single
+    ``bm25`` vector) is rejected with a clear message instead of failing
+    later on a missing vector name.
+    """
     coll = name or settings.collection_name
     client = get_client()
-    if not client.collection_exists(coll):
-        client.create_collection(
-            collection_name=coll,
-            vectors_config={
-                DENSE_VECTOR: models.VectorParams(
-                    size=EMBEDDING_DIM, distance=models.Distance.COSINE
-                )
-            },
-            sparse_vectors_config={
-                SPARSE_VECTOR: models.SparseVectorParams(modifier=models.Modifier.IDF)
-            },
-        )
-        for field in _INDEXED_FIELDS:
-            client.create_payload_index(
-                collection_name=coll,
-                field_name=field,
-                field_schema=models.PayloadSchemaType.KEYWORD,
+    if client.collection_exists(coll):
+        have = set((client.get_collection(coll).config.params.sparse_vectors or {}).keys())
+        missing = set(sparse_vector_names()) - have
+        if missing:
+            raise RuntimeError(
+                f"Collection '{coll}' lacks sparse vectors {sorted(missing)} (built by an "
+                "older version). Re-ingest: python -m src.ingest"
             )
+        return coll
+
+    client.create_collection(
+        collection_name=coll,
+        vectors_config={
+            DENSE_VECTOR: models.VectorParams(size=EMBEDDING_DIM, distance=models.Distance.COSINE)
+        },
+        sparse_vectors_config={
+            name: models.SparseVectorParams(modifier=models.Modifier.IDF)
+            for name in sparse_vector_names()
+        },
+    )
+    for field in _INDEXED_FIELDS:
+        client.create_payload_index(
+            collection_name=coll,
+            field_name=field,
+            field_schema=models.PayloadSchemaType.KEYWORD,
+        )
     return coll
 
 
@@ -125,39 +164,62 @@ def count_chunks(name: str | None = None) -> int:
     return client.count(collection_name=coll, exact=True).count
 
 
-def get_vectorstore(mode: str | None = None) -> QdrantVectorStore:
-    """LangChain wrapper over the shared client, in ``dense`` or ``hybrid`` mode."""
+def get_vectorstore(mode: str | None = None, language: str = DEFAULT_LANGUAGE) -> QdrantVectorStore:
+    """LangChain wrapper for querying, in ``dense`` or ``hybrid`` mode.
+
+    In hybrid mode ``language`` picks the BM25 vector (and the query
+    tokenizer); dense mode ignores it.
+    """
     mode = mode or settings.retrieval_mode
-    if mode not in _stores:
+    lang = language if language in _STEMMER_LANGUAGE else DEFAULT_LANGUAGE
+    key = (mode, lang if mode == "hybrid" else DEFAULT_LANGUAGE)
+    if key not in _stores:
         coll = ensure_collection()
-        _stores[mode] = QdrantVectorStore(
+        _stores[key] = QdrantVectorStore(
             client=get_client(),
             collection_name=coll,
             embedding=get_embeddings(),
-            sparse_embedding=get_sparse_embeddings(),
+            sparse_embedding=get_sparse_embeddings(key[1]),
             retrieval_mode=RetrievalMode.HYBRID if mode == "hybrid" else RetrievalMode.DENSE,
             vector_name=DENSE_VECTOR,
-            sparse_vector_name=SPARSE_VECTOR,
+            sparse_vector_name=sparse_vector_name(key[1]),
             distance=models.Distance.COSINE,
             validate_collection_config=False,
         )
-    return _stores[mode]
+    return _stores[key]
 
 
 def add_chunks(chunks: list[Document], batch_size: int = 256) -> None:
-    """Embed and upsert chunks, writing both the dense and the BM25 vector.
+    """Embed and upsert chunks with their dense vector and every BM25 vector.
 
     Point ids are the chunks' ``chunk_id`` (uuid4), so ids stay stable and
     traceable from an API response back to the stored point.
     """
     if not chunks:
         return
-    # The hybrid-mode store writes both vectors whatever mode queries use.
-    get_vectorstore("hybrid").add_documents(
-        chunks,
-        ids=[_point_id(c.metadata["chunk_id"]) for c in chunks],
-        batch_size=batch_size,
-    )
+    coll = ensure_collection()
+    client = get_client()
+    dense = get_embeddings()
+    encoders = {sparse_vector_name(lang): get_sparse_embeddings(lang) for lang in _STEMMER_LANGUAGE}
+
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start : start + batch_size]
+        texts = [c.page_content for c in batch]
+        dense_vecs = dense.embed_documents(texts)
+        sparse_vecs = {name: enc.embed_documents(texts) for name, enc in encoders.items()}
+        points = []
+        for i, chunk in enumerate(batch):
+            vector: dict = {DENSE_VECTOR: dense_vecs[i]}
+            for name, vecs in sparse_vecs.items():
+                vector[name] = models.SparseVector(indices=vecs[i].indices, values=vecs[i].values)
+            points.append(
+                models.PointStruct(
+                    id=_point_id(chunk.metadata["chunk_id"]),
+                    vector=vector,
+                    payload={_CONTENT_KEY: chunk.page_content, _METADATA_KEY: chunk.metadata},
+                )
+            )
+        client.upsert(collection_name=coll, points=points)
 
 
 def _point_id(chunk_id: str) -> str:

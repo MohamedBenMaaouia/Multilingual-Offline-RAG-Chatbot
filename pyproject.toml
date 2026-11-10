@@ -20,6 +20,9 @@ dependencies = [
   # Vector store — Qdrant (embedded or server); fastembed provides the BM25 sparse encoder
   "qdrant-client[fastembed]>=1.12,<2",
 
+  # Answer cache (Redis Stack, vector search)
+  "redis>=5,<7",
+
   # Embeddings
   "sentence-transformers>=3.0.0,<6",
 

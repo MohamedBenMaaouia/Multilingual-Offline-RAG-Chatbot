@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.routes import router
 from src.config import settings
 from src.embeddings import get_embeddings
+from src.language import SUPPORTED_LANGUAGES
 from src.vectorstore import get_sparse_embeddings, get_vectorstore, reset_caches
 
 
@@ -25,7 +26,8 @@ async def lifespan(app: FastAPI):
     # Warm singletons so first /chat doesn't pay the cold-start tax.
     try:
         get_embeddings()
-        get_sparse_embeddings()
+        for lang in SUPPORTED_LANGUAGES:
+            get_sparse_embeddings(lang)
     except Exception as exc:
         print(
             f"WARN: embedding warmup failed: {type(exc).__name__}: {exc}",

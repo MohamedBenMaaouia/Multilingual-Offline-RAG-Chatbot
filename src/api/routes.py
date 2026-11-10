@@ -24,8 +24,10 @@ from src.api.schemas import (
     IngestResponse,
     SourceRef,
 )
+from src import cache as answer_cache
 from src.chain import get_chain
 from src.config import settings
+from src.guardrails import leaks_system_prompt, looks_like_injection
 from src.ingest import ingest as run_ingest
 from src.language import language_name, resolve_language
 from src.vectorstore import count_chunks
@@ -70,10 +72,27 @@ def chat(request: ChatRequest) -> ChatResponse:
             retrieved_k=0,
         )
 
+    # Guardrail: known injection phrasing is refused before retrieval or any
+    # LLM call (src/guardrails.py). Same canned line as an unanswerable
+    # question, so the response gives an attacker nothing to iterate on.
+    if settings.guardrails_enabled and looks_like_injection(request.question):
+        print(f"guardrails: refused question with injection phrasing: {request.question[:120]!r}", file=sys.stderr)
+        return ChatResponse(answer=NO_CONTEXT_ANSWER, sources=[], latency_ms=0, retrieved_k=0)
+
     # Resolve the effective language once: an explicit request.language wins,
     # "auto" (the default) detects from the question. It then drives BOTH the
     # retrieval bias and the prompt's answer-language directive.
     lang = resolve_language(request.question, request.language)
+
+    # Answer cache (src/cache.py): a repeated or equivalent question returns
+    # the stored answer without retrieval or an LLM call.
+    t0 = time.perf_counter()
+    hit = answer_cache.lookup(request.question, lang)
+    if hit is not None:
+        cached, kind = hit
+        return ChatResponse(
+            **cached, latency_ms=int((time.perf_counter() - t0) * 1000), cache_hit=kind
+        )
 
     # Invoke the chain, timing only the LLM/retrieval wall-clock.
     t0 = time.perf_counter()
@@ -117,10 +136,26 @@ def chat(request: ChatRequest) -> ChatResponse:
             retrieved_k=0,
         )
 
+    answer = result.get("answer", "")
+    if settings.guardrails_enabled and leaks_system_prompt(answer):
+        print("guardrails: answer quoted the system prompt; replaced with refusal", file=sys.stderr)
+        return ChatResponse(
+            answer=NO_CONTEXT_ANSWER, sources=[], latency_ms=int(elapsed * 1000), retrieved_k=0
+        )
+
     sources = [_doc_to_source_ref(d) for d in context_docs]
+    answer_cache.store(
+        request.question,
+        lang,
+        {
+            "answer": answer,
+            "sources": [s.model_dump() for s in sources],
+            "retrieved_k": len(context_docs),
+        },
+    )
 
     return ChatResponse(
-        answer=result.get("answer", ""),
+        answer=answer,
         sources=sources,
         latency_ms=int(elapsed * 1000),
         retrieved_k=len(context_docs),

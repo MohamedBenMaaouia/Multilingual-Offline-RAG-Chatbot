@@ -14,11 +14,15 @@ to ``None`` (see src/api/routes.py:_doc_to_source_ref).
 """
 from __future__ import annotations
 
+import sys
+
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableLambda
 
+from src.config import settings
+from src.guardrails import looks_like_injection, strip_fences
 from src.language import language_name, resolve_language
 from src.llm import get_llm
 from src.prompt import get_document_prompt, get_prompt
@@ -29,14 +33,29 @@ _lang_chains: dict[str, object] = {}
 
 
 def _add_page_display(docs: list[Document]) -> list[Document]:
-    """Return COPIES of each Document with a string ``page_display`` field.
+    """Return LLM-facing COPIES of the Documents, with ``page_display`` and fencing.
 
     ``page_display = str(page)`` when ``page >= 0`` else ``"N/A"``. We copy
     each Document so the caller's references (the ``context`` slot echoed
     back to the API) are not mutated — only the LLM-facing view changes.
+
+    Guardrails (src/guardrails.py), when enabled: chunk text is stripped of
+    tags that could close the <document> fence, and a chunk carrying
+    injection phrasing (an attack planted inside an ingested document) is
+    left out of the prompt entirely.
     """
     out: list[Document] = []
     for d in docs:
+        text = d.page_content
+        if settings.guardrails_enabled:
+            if looks_like_injection(text):
+                print(
+                    f"guardrails: dropped retrieved chunk with injection phrasing "
+                    f"({(d.metadata or {}).get('source')}, chunk {(d.metadata or {}).get('chunk_id')})",
+                    file=sys.stderr,
+                )
+                continue
+            text = strip_fences(text)
         md = dict(d.metadata or {})
         raw_page = md.get("page", -1)
         try:
@@ -44,7 +63,7 @@ def _add_page_display(docs: list[Document]) -> list[Document]:
         except (TypeError, ValueError):
             page_int = -1
         md["page_display"] = "N/A" if page_int == -1 else str(page_int)
-        out.append(Document(page_content=d.page_content, metadata=md))
+        out.append(Document(page_content=text, metadata=md))
     return out
 
 
@@ -66,6 +85,9 @@ def _prepare_context(inputs: dict) -> dict:
     docs = inputs.get("context") or []
     new_inputs = dict(inputs)
     new_inputs["context"] = _add_page_display(docs)
+    if settings.guardrails_enabled:
+        # The question may not close the <question> fence either.
+        new_inputs["input"] = strip_fences(new_inputs.get("input") or "")
     if not new_inputs.get("answer_language"):
         new_inputs["answer_language"] = language_name(
             resolve_language(new_inputs.get("input") or "")

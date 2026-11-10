@@ -86,6 +86,21 @@ def _ensure_sample_pdf() -> Path:
     return pdf_path
 
 
+@pytest.fixture(autouse=True)
+def _answer_cache_off(monkeypatch):
+    """No test reads or writes the real Redis cache unless it opts in.
+
+    A cached answer from one test (or from real usage) would otherwise leak
+    into another test's /chat response.
+    """
+    from src import cache
+
+    monkeypatch.setattr(settings, "cache_enabled", False)
+    cache.reset()
+    yield
+    cache.reset()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _materialize_fixtures():
     """Make sure the binary fixtures exist before any test runs."""

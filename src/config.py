@@ -22,6 +22,10 @@ class Settings(BaseSettings):
 
     # sparse (BM25) encoder for hybrid search — FastEmbed model name
     sparse_model: str = "Qdrant/bm25"
+    # Each chunk stores one BM25 vector per language (English and French
+    # stemming/stopwords). True: a question uses its own language's vector.
+    # False: always the English one (the pre-Nov-10 behaviour, for A/B evals).
+    bm25_per_language: bool = True
 
     # retrieval
     # "dense": MiniLM vectors only, ranked by search_type (mmr | similarity).
@@ -62,6 +66,22 @@ class Settings(BaseSettings):
     ragas_judge_model: str = "qwen2.5:14b"
     ragas_judge_num_ctx: int = 8192
     ragas_judge_timeout_s: int = 600
+
+    # answer cache (src/cache.py) — Redis Stack (vector search) required.
+    # If Redis is unreachable the cache bypasses itself; /chat keeps working.
+    cache_enabled: bool = True
+    redis_url: str = "redis://localhost:6379/0"
+    cache_ttl_s: int = 7 * 24 * 3600
+    # Minimum cosine similarity between two questions for a semantic hit.
+    # Calibrated 2026-11-10 with MiniLM: different questions reach 0.77
+    # ("check oil level" vs "check coolant level"), close rewordings 0.86-0.97.
+    # 0.88 keeps a ~0.1 margin over the worst lookalike; loose paraphrases
+    # (~0.6-0.75) miss, which is the safe failure.
+    cache_similarity_threshold: float = 0.88
+
+    # prompt-injection guardrails (src/guardrails.py): question screening,
+    # fencing of untrusted text, dropping injected chunks, answer leak check.
+    guardrails_enabled: bool = True
 
     # api
     cors_origins: list[str] = ["http://localhost:3000"]
