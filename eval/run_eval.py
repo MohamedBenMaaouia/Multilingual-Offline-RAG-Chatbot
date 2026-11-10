@@ -36,6 +36,7 @@ except Exception:
 
 from src.chain import get_chain
 from src.config import settings
+from src.language import language_name, resolve_language
 from src.vectorstore import get_collection
 
 
@@ -113,8 +114,14 @@ def _safe_mean(values: list[float]) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def evaluate_question(chain, q: dict[str, Any]) -> dict[str, Any]:
-    """Run one question through the chain and compute deterministic metrics."""
+def evaluate_question(q: dict[str, Any]) -> dict[str, Any]:
+    """Run one question through the chain and compute deterministic metrics.
+
+    Mirrors the production ``/chat`` path exactly: language is resolved from
+    the question text the way ``language="auto"`` (the schema default) does,
+    then drives both the retrieval bias and the answer-language directive.
+    Evaluating an unbiased chain would measure a code path no client uses.
+    """
     qid = q["id"]
     question = q["question"]
     expected_sources = q.get("expected_sources") or []
@@ -122,9 +129,14 @@ def evaluate_question(chain, q: dict[str, Any]) -> dict[str, Any]:
     category = q["category"]
     language = q["language"]
 
+    resolved_lang = resolve_language(question)
+    chain = get_chain(resolved_lang)
+
     t0 = time.perf_counter()
     try:
-        result = chain.invoke({"input": question})
+        result = chain.invoke(
+            {"input": question, "answer_language": language_name(resolved_lang)}
+        )
     except Exception as e:  # pragma: no cover - operational
         print(f"[{qid}] chain.invoke FAILED: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
@@ -173,6 +185,7 @@ def evaluate_question(chain, q: dict[str, Any]) -> dict[str, Any]:
         "question": question,
         "category": category,
         "language": language,
+        "resolved_language": resolved_lang,
         "answer": answer,
         "retrieved_sources": retrieved_sources,
         "expected_sources": expected_sources,
@@ -449,9 +462,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Loaded {len(qa)} questions from {args.qa_path}")
 
-    # Warm singletons (embedding model, Chroma client, LLM).
+    # Warm singletons (embedding model, Chroma client, LLM). Per-question
+    # chains are resolved by language inside evaluate_question.
     print("Warming chain (embeddings + Chroma + Ollama)...")
-    chain = get_chain()
+    get_chain()
     coll = get_collection()
     collection_count = coll.count()
     print(f"  collection={settings.collection_name} count={collection_count}")
@@ -460,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[dict[str, Any]] = []
     for i, q in enumerate(qa, start=1):
         print(f"  [{i:>2}/{len(qa)}] {q['id']}  ({q['language']}, {q['category']})  {q['question'][:70]}")
-        row = evaluate_question(chain, q)
+        row = evaluate_question(q)
         rows.append(row)
         # Progress signal
         if row["category"] == "refusal":
@@ -481,6 +495,10 @@ def main(argv: list[str] | None = None) -> int:
             "top_k": settings.top_k,
             "fetch_k": settings.fetch_k,
             "mmr_lambda": settings.mmr_lambda,
+            # Day 6 deferred item: search_type was missing from the dump, so
+            # Row 6's similarity-vs-MMR run had to be inferred from filenames.
+            "search_type": settings.search_type,
+            "language_pref_ratio": settings.language_pref_ratio,
             "chunk_size": settings.chunk_size,
             "chunk_overlap": settings.chunk_overlap,
             "llm_model": settings.llm_model,

@@ -25,42 +25,24 @@ from langchain_community.document_loaders import (
     UnstructuredMarkdownLoader,
 )
 from langchain_core.documents import Document
-from langdetect import DetectorFactory, LangDetectException, detect_langs
 
 from src.config import settings
-
-# Make langdetect deterministic for tests/reproducibility.
-DetectorFactory.seed = 0
-
-_ALLOWED_LANGS = {"en", "fr", "ar"}
+from src.language import INGEST_CONFIDENCE, detect_language
 
 
 def _detect_language(
     text: str,
     default: str = "en",
-    confidence_threshold: float = 0.7,
+    confidence_threshold: float = INGEST_CONFIDENCE,
 ) -> str:
-    """Return 'fr'/'en'/'ar' if detected with confidence >= threshold; else default.
+    """Thin wrapper over ``src.language.detect_language`` for the ingest path.
 
-    Only inspects the first 500 chars (langdetect is slow on long text).
-    Catches LangDetectException for empty/non-textual content and returns
-    `default`. Any language outside {'fr','en','ar'} also collapses to default.
+    The implementation lives in ``src/language.py`` so the ingestion and
+    query paths cannot drift apart on what counts as 'French'.
     """
-    sample = (text or "").strip()[:500]
-    if not sample:
-        return default
-    try:
-        candidates = detect_langs(sample)
-    except LangDetectException:
-        return default
-    if not candidates:
-        return default
-    top = candidates[0]
-    if top.prob < confidence_threshold:
-        return default
-    if top.lang not in _ALLOWED_LANGS:
-        return default
-    return top.lang
+    return detect_language(
+        text, default=default, confidence_threshold=confidence_threshold
+    )
 
 
 def _rel_source(path: Path) -> str:

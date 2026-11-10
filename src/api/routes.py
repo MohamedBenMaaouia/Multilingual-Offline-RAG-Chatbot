@@ -27,6 +27,7 @@ from src.api.schemas import (
 from src.chain import get_chain
 from src.config import settings
 from src.ingest import ingest as run_ingest
+from src.language import language_name, resolve_language
 from src.vectorstore import get_collection
 
 router = APIRouter()
@@ -69,10 +70,20 @@ def chat(request: ChatRequest) -> ChatResponse:
             retrieved_k=0,
         )
 
+    # Resolve the effective language once: an explicit request.language wins,
+    # "auto" (the default) detects from the question. It then drives BOTH the
+    # retrieval bias and the prompt's answer-language directive.
+    lang = resolve_language(request.question, request.language)
+
     # Invoke the chain, timing only the LLM/retrieval wall-clock.
     t0 = time.perf_counter()
     try:
-        result = get_chain().invoke({"input": request.question})
+        result = get_chain(lang).invoke(
+            {
+                "input": request.question,
+                "answer_language": language_name(lang),
+            }
+        )
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
         print(f"Ollama unreachable: {type(exc).__name__}: {exc}", file=sys.stderr)
         raise HTTPException(status_code=503, detail="LLM unavailable, retry")

@@ -23,11 +23,15 @@ SYSTEM_PROMPT_TEMPLATE = """You are an expert {persona} assistant.
 Answer the user's question using ONLY the context provided below.
 
 Rules:
-- If the context does not contain enough information to answer, reply exactly:
+- If the context does not contain enough information to answer, reply with
+  this exact English sentence, unchanged, whatever the answer language:
   "I don't have enough information in my knowledge base to answer that reliably."
 - Do not invent part numbers, torque values, fluid capacities, diagnostic codes, norm references, or article numbers.
 - Cite the source filename in parentheses after each factual claim, e.g. (toyota_corolla_2019.pdf, p.47).
-- Reply in the SAME LANGUAGE as the user's question.
+- Write your ENTIRE answer in {answer_language}. Some context passages may be
+  in a different language; translate the facts you use into {answer_language}.
+  Reproduce identifiers (codes, part numbers, references, filenames) exactly
+  as they appear in the context — never translate those.
 - Be concise: 1-4 short paragraphs, or a short bulleted list when steps are involved.
 
 Context:
@@ -35,23 +39,37 @@ Context:
 
 Question: {input}
 
-Answer:"""
+Answer in {answer_language}:"""
 
 
 DOCUMENT_PROMPT_TEMPLATE = """[source: {source}, page: {page_display}]
 {page_content}"""
 
 
+# Fallback for {answer_language} when the caller supplies no concrete language.
+# Renders the original, weaker instruction rather than breaking the template,
+# so `prompt.format(context=..., input=...)` stays valid for callers and tests
+# that predate language-aware chat.
+DEFAULT_ANSWER_LANGUAGE = "the same language as the user's question"
+
+
 def get_prompt() -> PromptTemplate:
-    """Return a PromptTemplate with {persona} pre-filled.
+    """Return a PromptTemplate with {persona} and {answer_language} pre-filled.
 
     The remaining variables are {context} (filled by create_stuff_documents_chain
     from the retrieved Documents) and {input} (the user question, the default
     key used by create_retrieval_chain).
+
+    ``answer_language`` is a *partial* — supplying it at format/invoke time
+    overrides the default. ``src/chain.py`` always does, resolving it to a
+    concrete name like "French" so the model gets an unambiguous directive.
     """
     return PromptTemplate.from_template(
         SYSTEM_PROMPT_TEMPLATE,
-        partial_variables={"persona": settings.assistant_persona},
+        partial_variables={
+            "persona": settings.assistant_persona,
+            "answer_language": DEFAULT_ANSWER_LANGUAGE,
+        },
     )
 
 

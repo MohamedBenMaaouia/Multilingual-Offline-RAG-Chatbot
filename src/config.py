@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     mmr_lambda: float = 0.5
     search_type: Literal["mmr", "similarity"] = "mmr"
 
+    # Share of top_k reserved for chunks matching the request language.
+    # The remaining slots stay language-agnostic so cross-language content
+    # (e.g. an English-only code table) is still reachable from a French
+    # question. 0.0 disables language-aware retrieval entirely.
+    language_pref_ratio: float = 0.67
+
     # llm
     llm_model: str = "mistral:7b-instruct"
     ollama_url: str = "http://localhost:11434"

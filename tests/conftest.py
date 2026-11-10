@@ -115,16 +115,20 @@ def tmp_chroma(tmp_path_factory, monkeypatch):
     vectorstore._client = None
     vectorstore._collections.clear()
 
-    # Also drop the retriever singleton — it captures a Chroma handle.
+    # Also drop the retriever caches — they capture a Chroma handle. The
+    # chain caches wrap a retriever, so they have to go too.
+    from src import chain as chain_mod
     from src import retriever as retriever_mod
-    retriever_mod._retriever = None
+    retriever_mod.reset_caches()
+    chain_mod.reset_caches()
 
     yield tmp_dir
 
     # Teardown: clear singletons so no stale handle leaks into the next test.
     vectorstore._client = None
     vectorstore._collections.clear()
-    retriever_mod._retriever = None
+    retriever_mod.reset_caches()
+    chain_mod.reset_caches()
 
 
 # --------------------------------------------------------------------------
@@ -208,15 +212,15 @@ def mock_llm(mocker):
         side_effect=_ainvoke,
     )
 
-    # Reset LLM and chain singletons so subsequent get_llm/get_chain calls
+    # Reset LLM and chain caches so subsequent get_llm/get_chain calls
     # build against the patched ChatOllama.
     from src import llm as llm_mod
     from src import chain as chain_mod
     llm_mod._llm = None
-    chain_mod._chain = None
+    chain_mod.reset_caches()
 
     yield invoke_mock
 
     # Reset on teardown so the next test starts clean.
     llm_mod._llm = None
-    chain_mod._chain = None
+    chain_mod.reset_caches()

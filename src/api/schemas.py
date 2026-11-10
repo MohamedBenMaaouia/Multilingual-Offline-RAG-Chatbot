@@ -12,7 +12,9 @@ from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=3, max_length=1000)
-    language: Literal["auto", "en", "fr", "ar"] = "auto"
+    # "auto" detects from the question text. Adding a language means adding it
+    # here and in src.language.SUPPORTED_LANGUAGES — no logic changes.
+    language: Literal["auto", "en", "fr"] = "auto"
 
 
 class SourceRef(BaseModel):

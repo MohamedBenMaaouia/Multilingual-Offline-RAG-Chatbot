@@ -13,7 +13,7 @@ import pytest
 from langchain_core.prompts import BasePromptTemplate
 
 from src.config import settings
-from src.prompt import get_prompt
+from src.prompt import DEFAULT_ANSWER_LANGUAGE, get_prompt
 
 
 CANNED_REFUSAL = (
@@ -43,6 +43,26 @@ def test_persona_filled_from_settings():
     p = get_prompt()
     rendered = p.format(context="ctx", input="q")
     assert settings.assistant_persona in rendered
+
+
+def test_answer_language_defaults_when_not_supplied():
+    """The template must render without an explicit language (legacy callers)."""
+    rendered = get_prompt().format(context="ctx", input="q")
+    assert DEFAULT_ANSWER_LANGUAGE in rendered
+
+
+def test_answer_language_override_reaches_the_prompt():
+    """A concrete language name must replace the default in every slot."""
+    rendered = get_prompt().format(context="ctx", input="q", answer_language="French")
+    assert "ENTIRE answer in French" in rendered
+    assert "Answer in French:" in rendered
+    assert DEFAULT_ANSWER_LANGUAGE not in rendered
+
+
+def test_refusal_line_stays_english_regardless_of_answer_language():
+    """The canned refusal is a contract string checked verbatim by the API and eval."""
+    rendered = get_prompt().format(context="ctx", input="q", answer_language="French")
+    assert CANNED_REFUSAL in rendered
 
 
 def test_curly_braces_in_user_input_do_not_crash():
