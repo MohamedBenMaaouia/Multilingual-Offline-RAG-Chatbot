@@ -432,6 +432,8 @@ def aggregate(rows: list[dict[str, Any]], ragas_enabled: bool) -> dict[str, Any]
         "by_category": {k: _bucket_summary(v) for k, v in by_category.items()},
         "by_language": {k: _bucket_summary(v) for k, v in by_lang.items()},
         "latency_ms_mean": _safe_mean([float(r["latency_ms"]) for r in rows]),
+        # Fewer than top_k when the relevance cutoff drops weak chunks.
+        "chunks_sent_mean": _safe_mean([float(len(r["retrieved_sources"])) for r in rows]),
     }
 
     if ragas_enabled:
@@ -475,6 +477,7 @@ def print_summary(rows: list[dict[str, Any]], agg: dict[str, Any], out_path: Pat
     print(f"  passage MRR     : {_num(agg['passage_mrr_mean'])}")
     print(f"  file hit@{k}     : {_pct(agg['hit_at_k_mean'])}   <- any chunk from the right file")
     print(f"  file MRR        : {_num(agg['mrr_mean'])}")
+    print(f"  chunks to LLM   : {_num(agg['chunks_sent_mean'])} on average (top_k={k})")
     print("Answers:")
     print(f"  keyword recall  : {_pct(agg['keyword_recall_mean'])}  (all rows: {_pct(agg['keyword_recall_mean_all_rows'])})")
     if agg["refusal_correct_rate"] is not None:
@@ -587,6 +590,7 @@ def main(argv: list[str] | None = None) -> int:
             "retrieval_mode": settings.retrieval_mode,
             "bm25_per_language": settings.bm25_per_language,
             "reranker_model": settings.reranker_model if settings.reranker_enabled else None,
+            "rerank_relative_margin": settings.rerank_relative_margin if settings.reranker_enabled else None,
             "search_type": settings.search_type,
             "language_pref_ratio": settings.language_pref_ratio,
             "chunk_size": settings.chunk_size,

@@ -90,6 +90,7 @@ class RagRetriever(BaseRetriever):
     mmr_lambda: float
     language_pref_ratio: float
     rerank: bool = False
+    rerank_relative_margin: Optional[float] = None
     bm25_per_language: bool = True
 
     def _bm25_language(self) -> str:
@@ -134,7 +135,10 @@ class RagRetriever(BaseRetriever):
         return _merge_unique(preferred, general, limit=self.top_k)
 
     def _reranked(self, query: str) -> list[Document]:
-        """Wide candidate pool -> cross-encoder order -> language quota -> top_k."""
+        """Wide candidate pool -> cross-encoder order -> relevance cutoff -> language quota -> top_k.
+
+        With the cutoff, fewer than top_k chunks may come back (never zero).
+        """
         from src.reranker import rerank
 
         candidates = self._search(query, self.fetch_k)
@@ -145,6 +149,11 @@ class RagRetriever(BaseRetriever):
             same_lang = self._search(query, self.fetch_k, language=self.language)
             candidates = _merge_unique(same_lang, candidates, limit=2 * self.fetch_k)
         ranked = rerank(query, candidates)
+        if ranked and self.rerank_relative_margin is not None:
+            # Relevance cutoff: the best chunk always survives, anything far
+            # below it is noise that would only dilute the prompt.
+            floor = ranked[0].metadata["rerank_score"] - self.rerank_relative_margin
+            ranked = [d for d in ranked if d.metadata["rerank_score"] >= floor]
         if not n_pref:
             return ranked[: self.top_k]
         # Same quota semantics as the unreranked path: the best n_pref chunks
@@ -172,6 +181,7 @@ def get_retriever(language: str | None = None) -> RagRetriever:
             mmr_lambda=settings.mmr_lambda,
             language_pref_ratio=settings.language_pref_ratio,
             rerank=settings.reranker_enabled,
+            rerank_relative_margin=settings.rerank_relative_margin,
             bm25_per_language=settings.bm25_per_language,
         )
     return _retrievers[key]

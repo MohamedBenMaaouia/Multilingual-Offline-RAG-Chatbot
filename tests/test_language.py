@@ -112,8 +112,14 @@ def _ingest(docs):
     add_chunks(docs)
 
 
-def test_french_request_prefers_french_chunks(tmp_qdrant, bilingual_docs):
-    """A French-biased retriever must surface more French chunks than the default one."""
+def test_french_request_prefers_french_chunks(tmp_qdrant, bilingual_docs, monkeypatch):
+    """A French-biased retriever must surface more French chunks than the default one.
+
+    The relevance cutoff is off here: this tests the quota, and the cutoff
+    rightly drops the second French chunk (about *changing* oil) for a
+    question about *checking* it.
+    """
+    monkeypatch.setattr(settings, "rerank_relative_margin", None)
     _ingest(bilingual_docs)
     question = "Comment vérifier le niveau d'huile moteur ?"
 

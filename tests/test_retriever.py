@@ -79,6 +79,20 @@ def test_collection_has_dense_and_idf_weighted_bm25_per_language(tmp_qdrant):
         assert params.sparse_vectors[name].modifier == models.Modifier.IDF
 
 
+def test_wipe_really_empties_the_collection(tmp_qdrant, sample_docs):
+    """Regression: on Windows, qdrant-client's local delete left the SQLite
+    file behind and the next ingest stacked a second copy of the corpus."""
+    from src.vectorstore import count_chunks, delete_collection
+
+    add_chunks(sample_docs)
+    assert count_chunks() == 3
+    delete_collection()
+    ensure_collection()
+    assert count_chunks() == 0
+    add_chunks(sample_docs)
+    assert count_chunks() == 3
+
+
 def test_old_single_bm25_collection_is_rejected_with_reingest_hint(tmp_qdrant):
     """A pre-per-language collection must fail loudly, not on a missing vector mid-query."""
     get_client().create_collection(

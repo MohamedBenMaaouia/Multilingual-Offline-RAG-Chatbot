@@ -52,11 +52,13 @@ def test_retriever_honors_reranker_setting(tmp_qdrant, monkeypatch):
 
         retriever_mod.reset_caches()
         assert get_retriever().rerank is enabled
+        assert get_retriever().rerank_relative_margin == settings.rerank_relative_margin
 
 
 def test_reranked_path_keeps_top_k_and_language_quota(tmp_qdrant, monkeypatch, fake_scores):
     """English scores highest, yet the French quota (4 of 6) is still honored."""
     monkeypatch.setattr(settings, "reranker_enabled", True)
+    monkeypatch.setattr(settings, "rerank_relative_margin", None)  # quota only
     docs = [_doc(f"{90 + i} english chunk {i}", f"en-{i}", "en") for i in range(6)]
     docs += [_doc(f"{10 + i} chunk français {i}", f"fr-{i}", "fr") for i in range(6)]
     add_chunks(docs)
@@ -67,6 +69,43 @@ def test_reranked_path_keeps_top_k_and_language_quota(tmp_qdrant, monkeypatch, f
     assert langs[:4] == ["fr"] * 4, langs
     # Within the quota, cross-encoder order: best French score first.
     assert hits[0].metadata["chunk_id"] == "fr-5"
+
+
+def test_relevance_cutoff_drops_chunks_far_below_the_best(tmp_qdrant, monkeypatch, fake_scores):
+    """Margin 4: scores 9 and 6 survive (within 4 of 9), 4 and 1 are dropped."""
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+    monkeypatch.setattr(settings, "rerank_relative_margin", 4.0)
+    add_chunks([_doc(f"{s} chunk", f"c{s}") for s in (9, 6, 4, 1)])
+    hits = get_retriever().invoke("question")
+    assert [d.metadata["chunk_id"] for d in hits] == ["c9", "c6"]
+
+
+def test_relevance_cutoff_always_keeps_the_best_chunk(tmp_qdrant, monkeypatch, fake_scores):
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+    monkeypatch.setattr(settings, "rerank_relative_margin", 0.0)
+    add_chunks([_doc(f"{s} chunk", f"c{s}") for s in (3, 2, 1)])
+    hits = get_retriever().invoke("question")
+    assert [d.metadata["chunk_id"] for d in hits] == ["c3"]
+
+
+def test_relevance_cutoff_disabled_keeps_top_k(tmp_qdrant, monkeypatch, fake_scores):
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+    monkeypatch.setattr(settings, "rerank_relative_margin", None)
+    add_chunks([_doc(f"{s} chunk", f"c{s}") for s in (90, 9, 8, 7, 6, 5, 4)])
+    assert len(get_retriever().invoke("question")) == settings.top_k
+
+
+def test_cutoff_applies_before_the_language_quota(tmp_qdrant, monkeypatch, fake_scores):
+    """A weak same-language chunk is not forced back in by the quota."""
+    monkeypatch.setattr(settings, "reranker_enabled", True)
+    monkeypatch.setattr(settings, "rerank_relative_margin", 4.0)
+    add_chunks([
+        _doc("9 english best", "en-9", "en"),
+        _doc("8 english close", "en-8", "en"),
+        _doc("1 chunk français faible", "fr-1", "fr"),
+    ])
+    hits = get_retriever("fr").invoke("question")
+    assert "fr-1" not in [d.metadata["chunk_id"] for d in hits]
 
 
 def test_reranker_ranks_exact_code_first(tmp_qdrant, monkeypatch):

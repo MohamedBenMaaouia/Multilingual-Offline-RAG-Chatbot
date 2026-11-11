@@ -34,6 +34,7 @@ the API boundary (src/api/routes.py) normalizes -1 to null, unchanged.
 """
 from __future__ import annotations
 
+import shutil
 import uuid
 from typing import Optional
 
@@ -147,12 +148,36 @@ def ensure_collection(name: str | None = None) -> str:
 
 
 def delete_collection(name: str | None = None) -> None:
-    """Drop the collection if it exists and forget cached store handles."""
+    """Drop the collection if it exists and forget cached store handles.
+
+    Embedded mode on Windows: qdrant-client's local ``delete_collection``
+    removes the folder with ``shutil.rmtree(..., ignore_errors=True)`` while
+    the collection's SQLite file is still open, so the delete silently fails
+    and the next ``create_collection`` reopens the old file — every
+    "wipe + re-ingest" then stacks another copy of the corpus (seen
+    2026-11-11: 3 x 4556 points). Closing the client afterwards does not
+    help: the delete already removed the collection from the client's list,
+    so ``close()`` never reaches its file. We close that collection's
+    storage first, then delete, then fail loudly if a folder survives.
+    """
     coll = name or settings.collection_name
     client = get_client()
     if client.collection_exists(coll):
+        if not settings.qdrant_url:
+            local = getattr(client, "_client", None)  # QdrantLocal in embedded mode
+            collection = getattr(local, "collections", {}).get(coll)
+            if collection is not None:
+                collection.close()  # releases the SQLite file so the folder can go
         client.delete_collection(coll)
     _stores.clear()
+
+    if settings.qdrant_url:
+        return  # server mode deletes for real
+    leftover = settings.qdrant_path / "collection" / coll
+    if leftover.exists():
+        shutil.rmtree(leftover)  # raises if it still cannot be removed
+    if leftover.exists():
+        raise RuntimeError(f"Could not delete embedded Qdrant collection folder {leftover}")
 
 
 def count_chunks(name: str | None = None) -> int:

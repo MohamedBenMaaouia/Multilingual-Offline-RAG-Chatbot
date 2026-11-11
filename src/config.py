@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     # its row first; costs ~2 s per question on CPU.
     reranker_enabled: bool = True
     reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    # Relevance cutoff: drop reranked chunks scoring more than this below the
+    # best chunk for the same question, so weak chunks don't pad the prompt
+    # up to top_k. None disables it. Relative, not absolute: the reranker's
+    # raw scores are not comparable across questions (the out-of-scope eval
+    # question's best chunk outscores a correctly answered one). Calibrated
+    # 2026-11-11: 4.0 keeps every answer passage in the top 6 (15/15) and
+    # sends 4.8 chunks on average instead of 6; 3.0 loses one.
+    rerank_relative_margin: Optional[float] = 4.0
 
     # Share of top_k reserved for chunks matching the request language.
     # The remaining slots stay language-agnostic so cross-language content
@@ -93,6 +101,9 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+        # Lets optional settings be switched off from .env / the environment,
+        # e.g. RERANK_RELATIVE_MARGIN=none.
+        env_parse_none_str = "none"
 
 
 settings = Settings()

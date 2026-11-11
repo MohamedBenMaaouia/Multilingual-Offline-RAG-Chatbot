@@ -17,7 +17,7 @@ from src import retriever as _retriever
 from src.chunker import chunk_documents
 from src.config import settings
 from src.loaders import load_csv, load_markdown, load_pdfs
-from src.vectorstore import add_chunks, delete_collection, ensure_collection
+from src.vectorstore import add_chunks, count_chunks, delete_collection, ensure_collection
 
 
 def _load_all(data_raw: Path) -> list[Document]:
@@ -114,6 +114,17 @@ def ingest(paths: list[Path] | None = None, wipe_first: bool = False) -> dict:
     add_chunks(chunks)
     # Cached answers were built from the previous corpus.
     answer_cache.invalidate()
+
+    if wipe_first:
+        # A wipe must leave exactly this ingest's chunks. A mismatch means
+        # the delete did not take (see vectorstore.delete_collection) and
+        # every retrieval result would be silently skewed by duplicates.
+        stored = count_chunks()
+        if stored != chunks_created:
+            raise RuntimeError(
+                f"Collection holds {stored} chunks after a wipe + ingest of "
+                f"{chunks_created}; the old collection was not fully deleted."
+            )
 
     return {
         "documents_loaded": documents_loaded,
